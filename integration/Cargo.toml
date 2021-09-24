@@ -1,0 +1,11 @@
+[package]
+edition = "2018"
+name = "rjobs-integration"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "^1.0"
+rjobs = {path = "../rjobs"}
+serde = {version = "^1.0", features = ["derive"]}
+tokio = {version = "^1.0", features = ["full"]}
+tracing-subscriber = {version = "0.2.17", default-features = false, features = ["env-filter", "fmt"]}

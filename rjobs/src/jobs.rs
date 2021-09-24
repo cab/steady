@@ -1,11 +1,16 @@
-use crate::{error::Result, scheduler::QueueName};
+use crate::{
+    error::{Error, Result},
+    scheduler::QueueName,
+};
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-pub trait Schedulable: Serialize + DeserializeOwned {
-    type Error;
-    fn perform(&mut self) -> std::result::Result<(), Self::Error>;
+#[rjobs_typetag::serde(tag = "job_type")]
+#[async_trait::async_trait]
+pub trait Schedulable: Send + Sync {
+    // : Serialize + DeserializeOwned {
+    async fn perform(&mut self) -> std::result::Result<(), Error>;
 }
 
 #[derive(Debug)]
@@ -23,7 +28,7 @@ impl JobId {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobDefinition {
     pub(crate) id: JobId,
-    serialized_job: Vec<u8>,
+    pub(crate) serialized_job: Vec<u8>,
     enqueued_at: DateTime<Utc>,
     pub(crate) queue: QueueName,
     #[serde(skip)]
@@ -54,10 +59,11 @@ impl JobDefinitionDebug {
 }
 
 impl JobDefinition {
-    pub(crate) fn new<S>(job: &S, queue: QueueName, enqueued_at: DateTime<Utc>) -> Result<Self>
-    where
-        S: Serialize,
-    {
+    pub(crate) fn new<S>(
+        job: &dyn Schedulable,
+        queue: QueueName,
+        enqueued_at: DateTime<Utc>,
+    ) -> Result<Self> {
         let id = JobId::random();
         let serialized_job = bincode::serialize(job)?;
         Ok(Self {

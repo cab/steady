@@ -4,8 +4,8 @@ use crate::{
     jobs::{self, JobDefinition, Schedulable},
 };
 use chrono::Duration;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{any::Any, collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -46,6 +46,9 @@ where
     async fn run_next_job(&mut self) -> Result<()> {
         if let Some(next_job) = self.jobs.pop_front() {
             info!("running job: {:?}", next_job);
+            let mut schedulable =
+                bincode::deserialize::<Box<dyn Schedulable>>(&next_job.serialized_job)?;
+            schedulable.perform().await?;
         }
         Ok(())
     }
@@ -108,6 +111,13 @@ where
         })
     }
 
+    // pub fn register<S>(&mut self) -> Result<()>
+    // where
+    //     S: Schedulable,
+    // {
+    //     self.manager.register::<S>()
+    // }
+
     pub fn start(&mut self) {
         self.manager.start();
         self.poller.start();
@@ -123,8 +133,11 @@ where
         Ok(())
     }
 
-    pub async fn schedule(&self, job: impl Schedulable, queue: QueueName) -> Result<jobs::JobId> {
-        let job_def = jobs::JobDefinition::new(&job, queue, chrono::Utc::now())?;
+    pub async fn schedule<S>(&self, job: S, queue: QueueName) -> Result<jobs::JobId>
+    where
+        S: Schedulable,
+    {
+        let job_def = jobs::JobDefinition::new::<S>(&job, queue, chrono::Utc::now())?;
         debug!("scheduling {:?}", job_def);
         self.backend.schedule(&job_def).await?;
         Ok(job_def.id)
@@ -172,6 +185,13 @@ where
             backend,
         }
     }
+
+    // pub fn register<S>(&mut self) -> Result<()>
+    // where
+    //     S: Schedulable,
+    // {
+    //     Ok(())
+    // }
 
     fn action_tx(&self) -> UnboundedSender<ManagerAction> {
         self.handle_comms.0.clone()

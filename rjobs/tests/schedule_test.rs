@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rjobs::{MemoryBackend, QueueName, RedisBackend, Schedulable, Scheduler};
+use rjobs::{job, MemoryBackend, QueueName, RedisBackend, Schedulable, Scheduler};
 use serde::{Deserialize, Serialize};
 use test_env_log::test as logtest;
 
@@ -10,23 +10,22 @@ struct Log {
     message: String,
 }
 
+#[job]
 impl Schedulable for Log {
-    type Error = anyhow::Error;
-
-    fn perform(&mut self) -> Result<(), Self::Error> {
+    async fn perform(&mut self) -> Result<(), rjobs::Error> {
         tracing::info!("log! {}", self.message);
         Ok(())
     }
 }
 
 #[logtest(tokio::test)]
-async fn test_add() -> Result<()> {
+async fn test_redis() -> Result<()> {
     let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
     scheduler.start();
     let job_id = scheduler
         .schedule(
             Log {
-                message: "test".into(),
+                message: "test, redis".into(),
             },
             QueueName::from("default"),
         )
@@ -42,7 +41,7 @@ async fn test_memory() -> Result<()> {
     let job_id = scheduler
         .schedule(
             Log {
-                message: "test".into(),
+                message: "test, memory".into(),
             },
             QueueName::from("default"),
         )
