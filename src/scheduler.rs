@@ -7,8 +7,10 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::RwLock;
+use tokio::sync::{
+    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Mutex,
+};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -138,12 +140,12 @@ struct Manager<Backend> {
     ),
     backend: Backend,
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
-    inner: Arc<RwLock<ManagerInner<Backend>>>,
+    inner: Arc<ManagerInner<Backend>>,
 }
 
 #[derive(Debug)]
 struct ManagerInner<Backend> {
-    queues_by_name: HashMap<QueueName, Queue<Backend>>,
+    queues_by_name: HashMap<QueueName, Mutex<Queue<Backend>>>,
 }
 
 #[derive(Debug)]
@@ -160,12 +162,12 @@ where
         let handle_comms = unbounded_channel();
         let queues_by_name = vec![Queue::new(QueueName::from("default"), backend.clone())]
             .into_iter()
-            .map(|queue| (queue.name.clone(), queue))
+            .map(|queue| (queue.name.clone(), Mutex::new(queue)))
             .collect();
         Self {
             timer_handle: None,
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
-            inner: Arc::new(RwLock::new(ManagerInner { queues_by_name })),
+            inner: Arc::new(ManagerInner { queues_by_name }),
             rate,
             backend,
         }
@@ -178,7 +180,10 @@ where
     async fn drain(&mut self, from_backend: bool) -> Result<()> {
         debug!("sending message to drain manager");
         self.handle_comms.0.send(ManagerAction::Stop).unwrap(); // todo handle error
-        for queue in self.inner.write().await.queues_by_name.values_mut() {
+
+        for queue in self.inner.queues_by_name.values() {
+            // todo handle error
+            let mut queue = queue.lock().await;
             if let Err(e) = queue.drain(from_backend).await {
                 warn!("failed to drain `{}`: {}", queue.name, e);
             }
@@ -215,10 +220,9 @@ where
                                     .into_iter()
                                     .map(|job| (job.queue.clone(), vec![job]));
                                 for (queue, jobs) in jobs_by_queue {
-                                    if let Some(queue) =
-                                        inner.write().await.queues_by_name.get_mut(&queue)
-                                    {
-                                        queue.append_jobs(jobs);
+                                    if let Some(queue) = inner.queues_by_name.get(&queue) {
+                                        // todo handle error
+                                        queue.lock().await.append_jobs(jobs);
                                     }
                                 }
                             }
@@ -226,9 +230,9 @@ where
                     }
                     interval.tick().await;
 
-                    let mut inner = inner.write().await;
-                    for queue in inner.queues_by_name.values_mut() {
+                    for queue in inner.queues_by_name.values() {
                         // todo handle error
+                        let mut queue = queue.lock().await;
                         if let Err(e) = queue.process().await {
                             warn!("{} failed to process: {}", queue.name, e);
                         }
