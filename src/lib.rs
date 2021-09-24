@@ -9,9 +9,9 @@ use thiserror::private::AsDynError;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-pub use backends::redis::RedisBackend;
+pub use backends::{memory::MemoryBackend, redis::RedisBackend};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,7 +32,7 @@ pub trait Schedulable: Serialize + DeserializeOwned {
 #[derive(Debug)]
 pub struct Job {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobId(String);
 
 impl JobId {
@@ -41,7 +41,7 @@ impl JobId {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JobDefinition {
     serialized_job: Vec<u8>,
     id: JobId,
@@ -50,7 +50,17 @@ pub struct JobDefinition {
     debug: Option<JobDefinitionDebug>,
 }
 
-#[derive(Debug)]
+impl std::fmt::Debug for JobDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobDefinition")
+            .field("id", &self.id)
+            .field("enqueued_at", &self.enqueued_at)
+            .field("debug", &self.debug)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
 struct JobDefinitionDebug {
     job_type_name: &'static str,
 }
@@ -129,8 +139,23 @@ where
         Ok(())
     }
 
-    pub(crate) async fn drain(&mut self) -> Result<()> {
+    pub(crate) async fn drain(&mut self, from_backend: bool) -> Result<()> {
         info!("draining {}", self.name);
+        if from_backend {
+            loop {
+                match self.pull(NonZeroUsize::new(100).unwrap()).await {
+                    Err(e) => {
+                        warn!("failed to drain from backend: {}", e);
+                        break;
+                    }
+                    Ok(size) => {
+                        if size == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         while !self.jobs.is_empty() {
             if let Err(e) = self.run_next_job().await {
                 warn!("job failed: {}", e);
@@ -139,10 +164,12 @@ where
         Ok(())
     }
 
-    async fn pull(&mut self, count: NonZeroUsize) -> Result<()> {
-        let job_def = self.backend.pull(&self.name, count).await?;
-        self.jobs.push_back(job_def);
-        Ok(())
+    async fn pull(&mut self, count: NonZeroUsize) -> Result<usize> {
+        let job_defs = self.backend.pull(&self.name, count).await?;
+        let count = job_defs.len();
+        debug!("pulled {} jobs", count);
+        self.jobs.append(&mut VecDeque::from(job_defs));
+        Ok(count)
     }
 }
 
@@ -153,13 +180,74 @@ mod backends {
     #[async_trait::async_trait]
     pub trait Backend: Clone + Send + Sync {
         async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()>;
-        async fn pull(&self, queue: &QueueName, count: NonZeroUsize) -> Result<JobDefinition>;
+        async fn pull(&self, queue: &QueueName, count: NonZeroUsize) -> Result<Vec<JobDefinition>>;
+    }
+
+    pub(crate) mod memory {
+        use std::{
+            cell::RefCell,
+            collections::{HashMap, VecDeque},
+            num::NonZeroUsize,
+            sync::{Arc, Mutex},
+        };
+
+        use tracing::debug;
+
+        use crate::{Error, JobDefinition, QueueName, Result};
+
+        #[derive(Debug, Clone)]
+        pub struct MemoryBackend {
+            jobs_by_queue: Arc<Mutex<RefCell<HashMap<QueueName, VecDeque<JobDefinition>>>>>,
+        }
+
+        impl MemoryBackend {
+            pub fn new() -> Self {
+                Self {
+                    jobs_by_queue: Arc::new(Mutex::new(RefCell::new(HashMap::new()))),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl super::Backend for MemoryBackend {
+            async fn pull(
+                &self,
+                queue: &QueueName,
+                count: NonZeroUsize,
+            ) -> Result<Vec<JobDefinition>> {
+                if let Some(values) = self
+                    .jobs_by_queue
+                    .lock()
+                    .unwrap() // todo
+                    .borrow_mut()
+                    .get_mut(queue)
+                {
+                    let max = std::cmp::min(values.len(), count.get());
+                    let jobs = values.drain(0..max);
+                    Ok(jobs.into_iter().collect())
+                } else {
+                    Ok(vec![])
+                }
+            }
+
+            async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()> {
+                self.jobs_by_queue
+                    .lock()
+                    .unwrap() // todo
+                    .borrow_mut()
+                    .entry(queue.clone())
+                    .or_insert_with(VecDeque::new)
+                    .push_back(job_def.clone());
+                Ok(())
+            }
+        }
     }
 
     pub(crate) mod redis {
         use std::num::NonZeroUsize;
 
         use redis::AsyncCommands;
+        use tracing::warn;
 
         use crate::{Error, JobDefinition, Queue, QueueName, Result};
 
@@ -177,12 +265,32 @@ mod backends {
 
         #[async_trait::async_trait]
         impl super::Backend for RedisBackend {
-            async fn pull(&self, queue: &QueueName, count: NonZeroUsize) -> Result<JobDefinition> {
+            async fn pull(
+                &self,
+                queue: &QueueName,
+                count: NonZeroUsize,
+            ) -> Result<Vec<JobDefinition>> {
                 let mut connection = self.redis_client.get_async_connection().await?;
-                let job_def = connection
-                    .rpop::<_, JobDefinition>(queue, Some(count))
-                    .await?;
-                Ok(job_def)
+                // let job_defs = connection
+                //     .rpop::<_, Vec<JobDefinition>>(queue, Some(count))
+                //     .await?;
+                let mut job_defs = Vec::new();
+                for _ in 0..count.get() {
+                    match connection
+                        .rpop::<_, Option<JobDefinition>>(queue, None)
+                        .await
+                    {
+                        Ok(Some(job_def)) => job_defs.push(job_def),
+                        Ok(None) => {
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("failed to rpop: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Ok(job_defs)
             }
 
             async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()> {
@@ -219,9 +327,13 @@ where
         self.poller.start();
     }
 
-    pub async fn drain(&mut self) -> Result<()> {
-        self.poller.stop().await;
-        self.manager.drain().await;
+    pub async fn drain(&mut self, from_backend: bool) -> Result<()> {
+        if let Err(e) = self.poller.stop().await {
+            error!("failed to stop poller: {}", e);
+        }
+        if let Err(e) = self.manager.drain(from_backend).await {
+            error!("failed to stop manager: {}", e);
+        }
         Ok(())
     }
 
@@ -229,7 +341,7 @@ where
         let queue = QueueName::from("default");
         let job_def = JobDefinition::new(&job, chrono::Utc::now())?;
         debug!("scheduling {:?} on {}", job_def, queue);
-        self.backend.schedule(&queue, &job_def);
+        self.backend.schedule(&queue, &job_def).await?;
         Ok(job_def.id)
     }
 }
@@ -267,11 +379,11 @@ where
         }
     }
 
-    async fn drain(&mut self) -> Result<()> {
+    async fn drain(&mut self, from_backend: bool) -> Result<()> {
         debug!("sending message to drain manager");
         self.handle_comms.0.send(()).unwrap(); // todo handle error
         for queue in &mut self.inner.write().await.queues {
-            if let Err(e) = queue.drain().await {
+            if let Err(e) = queue.drain(from_backend).await {
                 warn!("failed to drain `{}`: {}", queue.name, e);
             }
         }
@@ -384,7 +496,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QueueName(String);
 
 impl std::fmt::Display for QueueName {

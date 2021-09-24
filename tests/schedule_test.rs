@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use rjobs::{RedisBackend, Schedulable, Scheduler};
+use rjobs::{MemoryBackend, RedisBackend, Schedulable, Scheduler};
 use serde::{Deserialize, Serialize};
 use test_env_log::test as logtest;
 
@@ -30,6 +30,19 @@ async fn test_add() -> Result<()> {
             message: "test".into(),
         })
         .await?;
-    scheduler.drain().await?;
+    scheduler.drain(true).await?;
     Ok(())
 }
+
+// #[logtest(tokio::test)]
+// async fn test_memory() -> Result<()> {
+//     let mut scheduler = Scheduler::new(MemoryBackend::new())?;
+//     scheduler.start();
+//     let job_id = scheduler
+//         .schedule(Log {
+//             message: "test".into(),
+//         })
+//         .await?;
+//     scheduler.drain(true).await?;
+//     Ok(())
+// }
