@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use rjobs::{MemoryBackend, RedisBackend, Schedulable, Scheduler};
 use serde::{Deserialize, Serialize};
@@ -34,15 +32,15 @@ async fn test_add() -> Result<()> {
     Ok(())
 }
 
-// #[logtest(tokio::test)]
-// async fn test_memory() -> Result<()> {
-//     let mut scheduler = Scheduler::new(MemoryBackend::new())?;
-//     scheduler.start();
-//     let job_id = scheduler
-//         .schedule(Log {
-//             message: "test".into(),
-//         })
-//         .await?;
-//     scheduler.drain(true).await?;
-//     Ok(())
-// }
+#[logtest(tokio::test)]
+async fn test_memory() -> Result<()> {
+    let mut scheduler = Scheduler::new(MemoryBackend::default())?;
+    scheduler.start();
+    let job_id = scheduler
+        .schedule(Log {
+            message: "test".into(),
+        })
+        .await?;
+    scheduler.drain(true).await?;
+    Ok(())
+}
