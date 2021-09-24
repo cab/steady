@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::{error::Result, scheduler::QueueName};
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -25,6 +25,7 @@ pub struct JobDefinition {
     pub(crate) id: JobId,
     serialized_job: Vec<u8>,
     enqueued_at: DateTime<Utc>,
+    pub(crate) queue: QueueName,
     #[serde(skip)]
     debug: Option<JobDefinitionDebug>,
 }
@@ -53,7 +54,7 @@ impl JobDefinitionDebug {
 }
 
 impl JobDefinition {
-    pub(crate) fn new<S>(job: &S, enqueued_at: DateTime<Utc>) -> Result<Self>
+    pub(crate) fn new<S>(job: &S, queue: QueueName, enqueued_at: DateTime<Utc>) -> Result<Self>
     where
         S: Serialize,
     {
@@ -61,6 +62,7 @@ impl JobDefinition {
         let serialized_job = bincode::serialize(job)?;
         Ok(Self {
             serialized_job,
+            queue,
             id,
             enqueued_at,
             debug: Some(JobDefinitionDebug::new::<S>()),

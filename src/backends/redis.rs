@@ -58,10 +58,10 @@ impl super::Backend for Backend {
         Ok(job_defs)
     }
 
-    async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()> {
+    async fn schedule(&self, job_def: &JobDefinition) -> Result<()> {
         let mut connection = self.redis_client.get_async_connection().await?;
         let () = connection
-            .lpush(&queue, job_definition_to_redis_args(job_def)?)
+            .lpush(&job_def.queue, job_definition_to_redis_args(job_def)?)
             .await?;
         Ok(())
     }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rjobs::{MemoryBackend, RedisBackend, Schedulable, Scheduler};
+use rjobs::{MemoryBackend, QueueName, RedisBackend, Schedulable, Scheduler};
 use serde::{Deserialize, Serialize};
 use test_env_log::test as logtest;
 
@@ -24,9 +24,12 @@ async fn test_add() -> Result<()> {
     let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
     scheduler.start();
     let job_id = scheduler
-        .schedule(Log {
-            message: "test".into(),
-        })
+        .schedule(
+            Log {
+                message: "test".into(),
+            },
+            QueueName::from("default"),
+        )
         .await?;
     scheduler.drain(true).await?;
     Ok(())
@@ -37,9 +40,12 @@ async fn test_memory() -> Result<()> {
     let mut scheduler = Scheduler::new(MemoryBackend::default())?;
     scheduler.start();
     let job_id = scheduler
-        .schedule(Log {
-            message: "test".into(),
-        })
+        .schedule(
+            Log {
+                message: "test".into(),
+            },
+            QueueName::from("default"),
+        )
         .await?;
     scheduler.drain(true).await?;
     Ok(())

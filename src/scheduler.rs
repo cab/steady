@@ -4,7 +4,8 @@ use crate::{
     jobs::{self, JobDefinition, Schedulable},
 };
 use chrono::Duration;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
@@ -96,8 +97,8 @@ where
     Backend: backends::Backend + 'static,
 {
     pub fn new(backend: Backend) -> Result<Self> {
-        let poller = Poller::new(backend.clone(), Duration::seconds(1));
         let manager = Manager::new(backend.clone(), Duration::seconds(1));
+        let poller = Poller::new(backend.clone(), Duration::seconds(1), manager.action_tx());
         Ok(Self {
             backend,
             poller,
@@ -120,11 +121,10 @@ where
         Ok(())
     }
 
-    pub async fn schedule(&self, job: impl Schedulable) -> Result<jobs::JobId> {
-        let queue = QueueName::from("default");
-        let job_def = jobs::JobDefinition::new(&job, chrono::Utc::now())?;
-        debug!("scheduling {:?} on {}", job_def, queue);
-        self.backend.schedule(&queue, &job_def).await?;
+    pub async fn schedule(&self, job: impl Schedulable, queue: QueueName) -> Result<jobs::JobId> {
+        let job_def = jobs::JobDefinition::new(&job, queue, chrono::Utc::now())?;
+        debug!("scheduling {:?}", job_def);
+        self.backend.schedule(&job_def).await?;
         Ok(job_def.id)
     }
 }
@@ -132,8 +132,10 @@ where
 #[derive(Debug)]
 struct Manager<Backend> {
     rate: Duration,
-    job_comms: (UnboundedSender<()>, UnboundedReceiver<()>),
-    handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
+    handle_comms: (
+        UnboundedSender<ManagerAction>,
+        Option<UnboundedReceiver<ManagerAction>>,
+    ),
     backend: Backend,
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
     inner: Arc<RwLock<ManagerInner<Backend>>>,
@@ -141,7 +143,13 @@ struct Manager<Backend> {
 
 #[derive(Debug)]
 struct ManagerInner<Backend> {
-    queues: Vec<Queue<Backend>>,
+    queues_by_name: HashMap<QueueName, Queue<Backend>>,
+}
+
+#[derive(Debug)]
+enum ManagerAction {
+    Stop,
+    PushJobs(Vec<JobDefinition>),
 }
 
 impl<Backend> Manager<Backend>
@@ -149,23 +157,28 @@ where
     Backend: backends::Backend + 'static,
 {
     fn new(backend: Backend, rate: Duration) -> Self {
-        let job_comms = unbounded_channel();
         let handle_comms = unbounded_channel();
-        let queues = vec![Queue::new(QueueName::from("default"), backend.clone())];
+        let queues_by_name = vec![Queue::new(QueueName::from("default"), backend.clone())]
+            .into_iter()
+            .map(|queue| (queue.name.clone(), queue))
+            .collect();
         Self {
             timer_handle: None,
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
-            inner: Arc::new(RwLock::new(ManagerInner { queues })),
+            inner: Arc::new(RwLock::new(ManagerInner { queues_by_name })),
             rate,
-            job_comms,
             backend,
         }
     }
 
+    fn action_tx(&self) -> UnboundedSender<ManagerAction> {
+        self.handle_comms.0.clone()
+    }
+
     async fn drain(&mut self, from_backend: bool) -> Result<()> {
         debug!("sending message to drain manager");
-        self.handle_comms.0.send(()).unwrap(); // todo handle error
-        for queue in &mut self.inner.write().await.queues {
+        self.handle_comms.0.send(ManagerAction::Stop).unwrap(); // todo handle error
+        for queue in self.inner.write().await.queues_by_name.values_mut() {
             if let Err(e) = queue.drain(from_backend).await {
                 warn!("failed to drain `{}`: {}", queue.name, e);
             }
@@ -186,30 +199,39 @@ where
         }
         self.timer_handle = Some(tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
-            let tx = self.job_comms.0.clone();
             let rate = self.rate;
             let inner = self.inner.clone();
             async move {
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {
-                    if let Ok(_task_message) = rx.try_recv() {
-                        info!("manager stopping");
-                        // todo multiple types of message
-                        break;
+                    if let Ok(action) = rx.try_recv() {
+                        match action {
+                            ManagerAction::Stop => {
+                                info!("manager stopping");
+                                break;
+                            }
+                            ManagerAction::PushJobs(all_jobs) => {
+                                let jobs_by_queue = all_jobs
+                                    .into_iter()
+                                    .map(|job| (job.queue.clone(), vec![job]));
+                                for (queue, jobs) in jobs_by_queue {
+                                    if let Some(queue) =
+                                        inner.write().await.queues_by_name.get_mut(&queue)
+                                    {
+                                        queue.append_jobs(jobs);
+                                    }
+                                }
+                            }
+                        }
                     }
                     interval.tick().await;
 
                     let mut inner = inner.write().await;
-                    for queue in &mut inner.queues {
+                    for queue in inner.queues_by_name.values_mut() {
                         // todo handle error
                         if let Err(e) = queue.process().await {
                             warn!("{} failed to process: {}", queue.name, e);
                         }
-                    }
-
-                    if let Err(e) = tx.send(()) {
-                        // todo
-                        warn!("failed to send: {}", e);
                     }
                 }
                 Result::Ok(())
@@ -222,23 +244,37 @@ where
 struct Poller<Backend> {
     rate: Duration,
     backend: Backend,
-    job_comms: (UnboundedSender<()>, UnboundedReceiver<()>),
+    manager_tx: UnboundedSender<ManagerAction>,
     handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+// todo better name
+struct PollerInner<Backend> {
+    backend: Backend,
+}
+
+impl<Backend> PollerInner<Backend> {
+    fn new(backend: Backend) -> Self {
+        Self { backend }
+    }
+
+    async fn poll(&self) -> Result<Vec<JobDefinition>> {
+        Ok(vec![])
+    }
 }
 
 impl<Backend> Poller<Backend>
 where
     Backend: backends::Backend + 'static,
 {
-    fn new(backend: Backend, rate: Duration) -> Self {
-        let job_comms = unbounded_channel();
+    fn new(backend: Backend, rate: Duration, manager_tx: UnboundedSender<ManagerAction>) -> Self {
         let handle_comms = unbounded_channel();
         Self {
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
             timer_handle: None,
             backend,
-            job_comms,
+            manager_tx,
             rate,
         }
     }
@@ -263,8 +299,9 @@ where
         }
         self.timer_handle = Some(tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
-            let tx = self.job_comms.0.clone();
+            let manager_tx = self.manager_tx.clone();
             let rate = self.rate;
+            let inner = PollerInner::new(self.backend.clone());
             async move {
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {
@@ -273,10 +310,17 @@ where
                         // todo multiple types of message
                         break;
                     }
+
                     interval.tick().await;
-                    if let Err(e) = tx.send(()) {
-                        // todo
-                        warn!("failed to send: {}", e);
+
+                    match inner.poll().await {
+                        Ok(jobs) => {
+                            manager_tx.send(ManagerAction::PushJobs(jobs)).unwrap();
+                            // todo error handle
+                        }
+                        Err(e) => {
+                            todo!("{}", e);
+                        }
                     }
                 }
                 Result::Ok(())
@@ -285,7 +329,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueueName(String);
 
 impl QueueName {

@@ -29,12 +29,12 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()> {
+    async fn schedule(&self, job_def: &JobDefinition) -> Result<()> {
         self.jobs_by_queue
             .lock()
             .unwrap() // todo
             .borrow_mut()
-            .entry(queue.clone())
+            .entry(job_def.queue.clone())
             .or_insert_with(VecDeque::new)
             .push_back(job_def.clone());
         Ok(())
