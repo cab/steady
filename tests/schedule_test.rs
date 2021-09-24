@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use rjobs::{Schedulable, Scheduler};
+use rjobs::{RedisBackend, Schedulable, Scheduler};
 use serde::{Deserialize, Serialize};
 use test_env_log::test as logtest;
 
@@ -23,7 +23,7 @@ impl Schedulable for Log {
 
 #[logtest(tokio::test)]
 async fn test_add() -> Result<()> {
-    let mut scheduler = Scheduler::new(REDIS_URL)?;
+    let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
     scheduler.start();
     let job_id = scheduler
         .schedule(Log {

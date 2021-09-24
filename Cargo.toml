@@ -5,6 +5,7 @@ resolver = "2"
 version = "0.1.0"
 
 [dependencies]
+async-trait = "^0.1"
 bincode = "^1.0"
 chrono = {version = "^0.4", features = ["serde"]}
 nanoid = "^0.4"

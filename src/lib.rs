@@ -1,3 +1,4 @@
+use backends::Backend;
 use chrono::{DateTime, Duration, Utc};
 use nanoid::nanoid;
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
@@ -9,6 +10,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
 use tokio::time;
 use tracing::{debug, info, warn};
+
+pub use backends::redis::RedisBackend;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -39,7 +42,7 @@ impl JobId {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct JobDefinition {
+pub struct JobDefinition {
     serialized_job: Vec<u8>,
     id: JobId,
     enqueued_at: DateTime<Utc>,
@@ -91,17 +94,20 @@ impl JobDefinition {
 }
 
 #[derive(Debug)]
-struct Queue {
+struct Queue<Backend> {
     name: QueueName,
     jobs: VecDeque<JobDefinition>,
-    redis_client: redis::Client,
+    backend: Backend,
 }
 
-impl Queue {
-    fn new(name: QueueName, redis_client: redis::Client) -> Self {
+impl<Backend> Queue<Backend>
+where
+    Backend: backends::Backend,
+{
+    fn new(name: QueueName, backend: Backend) -> Self {
         Self {
             name,
-            redis_client,
+            backend,
             jobs: VecDeque::new(),
         }
     }
@@ -134,32 +140,75 @@ impl Queue {
     }
 
     async fn pull(&mut self, count: NonZeroUsize) -> Result<()> {
-        let mut connection = self.redis_client.get_async_connection().await?;
-        let job_def = connection
-            .rpop::<_, JobDefinition>(&self.name, Some(count))
-            .await?;
+        let job_def = self.backend.pull(&self.name, count).await?;
         self.jobs.push_back(job_def);
         Ok(())
     }
 }
 
 mod backends {
-    pub trait Backend {}
+    use std::num::NonZeroUsize;
+
+    use crate::{Error, JobDefinition, QueueName, Result};
+    #[async_trait::async_trait]
+    pub trait Backend: Clone + Send + Sync {
+        async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()>;
+        async fn pull(&self, queue: &QueueName, count: NonZeroUsize) -> Result<JobDefinition>;
+    }
+
+    pub(crate) mod redis {
+        use std::num::NonZeroUsize;
+
+        use redis::AsyncCommands;
+
+        use crate::{Error, JobDefinition, Queue, QueueName, Result};
+
+        #[derive(Debug, Clone)]
+        pub struct RedisBackend {
+            redis_client: redis::Client,
+        }
+
+        impl RedisBackend {
+            pub fn new(redis_url: &str) -> Result<Self> {
+                let redis_client = redis::Client::open(redis_url)?;
+                Ok(Self { redis_client })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl super::Backend for RedisBackend {
+            async fn pull(&self, queue: &QueueName, count: NonZeroUsize) -> Result<JobDefinition> {
+                let mut connection = self.redis_client.get_async_connection().await?;
+                let job_def = connection
+                    .rpop::<_, JobDefinition>(queue, Some(count))
+                    .await?;
+                Ok(job_def)
+            }
+
+            async fn schedule(&self, queue: &QueueName, job_def: &JobDefinition) -> Result<()> {
+                let mut connection = self.redis_client.get_async_connection().await?;
+                let () = connection.lpush(&queue, job_def.to_redis_args()?).await?;
+                Ok(())
+            }
+        }
+    }
 }
 
 pub struct Scheduler<Backend> {
-    redis_client: redis::Client,
-    poller: Poller,
-    manager: Manager,
+    backend: Backend,
+    poller: Poller<Backend>,
+    manager: Manager<Backend>,
 }
 
-impl<Backend> Scheduler<Backend> {
-    pub fn new(redis_url: &str) -> Result<Self> {
-        let redis_client = redis::Client::open(redis_url)?;
-        let poller = Poller::new(redis_client.clone(), Duration::seconds(1));
-        let manager = Manager::new(redis_client.clone(), Duration::seconds(1));
+impl<Backend> Scheduler<Backend>
+where
+    Backend: backends::Backend + 'static,
+{
+    pub fn new(backend: Backend) -> Result<Self> {
+        let poller = Poller::new(backend.clone(), Duration::seconds(1));
+        let manager = Manager::new(backend.clone(), Duration::seconds(1));
         Ok(Self {
-            redis_client,
+            backend,
             poller,
             manager,
         })
@@ -180,39 +229,41 @@ impl<Backend> Scheduler<Backend> {
         let queue = QueueName::from("default");
         let job_def = JobDefinition::new(&job, chrono::Utc::now())?;
         debug!("scheduling {:?} on {}", job_def, queue);
-        let mut connection = self.redis_client.get_async_connection().await?;
-        let () = connection.lpush(&queue, job_def.to_redis_args()?).await?;
+        self.backend.schedule(&queue, &job_def);
         Ok(job_def.id)
     }
 }
 
 #[derive(Debug)]
-struct Manager {
+struct Manager<Backend> {
     rate: Duration,
     job_comms: (UnboundedSender<()>, UnboundedReceiver<()>),
     handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
-    redis_client: redis::Client,
+    backend: Backend,
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
-    inner: Arc<RwLock<ManagerInner>>,
+    inner: Arc<RwLock<ManagerInner<Backend>>>,
 }
 
 #[derive(Debug)]
-struct ManagerInner {
-    queues: Vec<Queue>,
+struct ManagerInner<Backend> {
+    queues: Vec<Queue<Backend>>,
 }
 
-impl Manager {
-    fn new(redis_client: redis::Client, rate: Duration) -> Self {
+impl<Backend> Manager<Backend>
+where
+    Backend: backends::Backend + 'static,
+{
+    fn new(backend: Backend, rate: Duration) -> Self {
         let job_comms = unbounded_channel();
         let handle_comms = unbounded_channel();
-        let queues = vec![Queue::new(QueueName::from("default"), redis_client.clone())];
+        let queues = vec![Queue::new(QueueName::from("default"), backend.clone())];
         Self {
             timer_handle: None,
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
             inner: Arc::new(RwLock::new(ManagerInner { queues })),
             rate,
             job_comms,
-            redis_client,
+            backend,
         }
     }
 
@@ -269,22 +320,25 @@ impl Manager {
 }
 
 #[derive(Debug)]
-struct Poller {
+struct Poller<Backend> {
     rate: Duration,
-    redis_client: redis::Client,
+    backend: Backend,
     job_comms: (UnboundedSender<()>, UnboundedReceiver<()>),
     handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-impl Poller {
-    fn new(redis_client: redis::Client, rate: Duration) -> Self {
+impl<Backend> Poller<Backend>
+where
+    Backend: backends::Backend + 'static,
+{
+    fn new(backend: Backend, rate: Duration) -> Self {
         let job_comms = unbounded_channel();
         let handle_comms = unbounded_channel();
         Self {
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
             timer_handle: None,
-            redis_client,
+            backend,
             job_comms,
             rate,
         }
@@ -331,7 +385,7 @@ impl Poller {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QueueName(String);
+pub struct QueueName(String);
 
 impl std::fmt::Display for QueueName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
