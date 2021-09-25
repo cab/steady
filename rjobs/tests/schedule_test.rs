@@ -5,10 +5,8 @@ use test_env_log::test as logtest;
 
 const REDIS_URL: &'static str = "redis://127.0.0.1";
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Log {
-    message: String,
-}
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct Log {}
 
 #[job]
 impl Schedulable for Log {

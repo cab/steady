@@ -5,7 +5,7 @@ use quote::quote;
 pub fn job(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut prefix = TokenStream::from(quote! {
       #[rjobs::async_trait::async_trait]
-      #[rjobs::typetag::serde]
+      // #[rjobs::typetag::serde]
     });
     prefix.extend(item);
     prefix

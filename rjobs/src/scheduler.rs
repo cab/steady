@@ -2,20 +2,25 @@ use crate::{
     backends,
     error::Result,
     jobs::{self, JobDefinition, Schedulable},
+    Error,
 };
 use chrono::Duration;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{any::Any, collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
-use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    Mutex,
-};
 use tokio::time;
+use tokio::{
+    runtime::Handle,
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        Mutex,
+    },
+};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 struct Queue<Backend> {
+    handlers: Handlers,
     name: QueueName,
     jobs: VecDeque<jobs::JobDefinition>,
     backend: Backend,
@@ -25,11 +30,12 @@ impl<Backend> Queue<Backend>
 where
     Backend: backends::Backend,
 {
-    fn new(name: QueueName, backend: Backend) -> Self {
+    fn new(name: QueueName, backend: Backend, handlers: Handlers) -> Self {
         Self {
+            jobs: VecDeque::new(),
             name,
             backend,
-            jobs: VecDeque::new(),
+            handlers,
         }
     }
 
@@ -46,9 +52,11 @@ where
     async fn run_next_job(&mut self) -> Result<()> {
         if let Some(next_job) = self.jobs.pop_front() {
             info!("running job: {:?}", next_job);
-            let mut schedulable =
-                bincode::deserialize::<Box<dyn Schedulable>>(&next_job.serialized_job)?;
-            schedulable.perform().await?;
+            self.handlers
+                .get(&next_job.job_name)
+                .unwrap()
+                .perform(&next_job.serialized_job_data)
+                .await?;
         }
         Ok(())
     }
@@ -111,12 +119,12 @@ where
         })
     }
 
-    // pub fn register<S>(&mut self) -> Result<()>
-    // where
-    //     S: Schedulable,
-    // {
-    //     self.manager.register::<S>()
-    // }
+    pub fn register<S>(&mut self) -> Result<()>
+    where
+        S: Schedulable + 'static,
+    {
+        self.manager.register::<S>()
+    }
 
     pub fn start(&mut self) {
         self.manager.start();
@@ -133,11 +141,17 @@ where
         Ok(())
     }
 
-    pub async fn schedule<S>(&self, job: S, queue: QueueName) -> Result<jobs::JobId>
+    pub async fn schedule<R, S>(&self, job_data: &S, queue: QueueName) -> Result<jobs::JobId>
     where
-        S: Schedulable,
+        R: Schedulable,
+        S: prost::Message,
     {
-        let job_def = jobs::JobDefinition::new::<S>(&job, queue, chrono::Utc::now())?;
+        let job_def = jobs::JobDefinition::new::<S>(
+            job_data,
+            R::NAME.to_string(),
+            queue,
+            chrono::Utc::now(),
+        )?;
         debug!("scheduling {:?}", job_def);
         self.backend.schedule(&job_def).await?;
         Ok(job_def.id)
@@ -153,7 +167,67 @@ struct Manager<Backend> {
     ),
     backend: Backend,
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
-    inner: Arc<ManagerInner<Backend>>,
+    inner: Option<Arc<ManagerInner<Backend>>>,
+    handlers: Handlers,
+}
+
+#[async_trait::async_trait]
+trait AnySchedulable: Send + Sync {
+    async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<T, A, E> AnySchedulable for T
+where
+    A: prost::Message + Default,
+    E: std::fmt::Debug,
+    T: Schedulable<Arg = A, Error = E> + 'static,
+{
+    async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()> {
+        let proto = A::decode(serialized_job_data).unwrap(); // todo
+        let mut runner = T::default();
+        match T::perform(&mut runner, proto).await {
+            Ok(_) => {}
+            Err(e) => {
+                // todo constraint error type to std::error::Error?
+                error!("job failed: {:?}", e);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Clone)]
+struct Handlers {
+    handlers_by_name: HashMap<String, Arc<Box<dyn Fn() -> Box<dyn AnySchedulable> + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for Handlers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handlers")
+            .field("names", &self.handlers_by_name.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl Handlers {
+    fn register<S>(&mut self) -> Result<()>
+    where
+        S: Schedulable + 'static,
+    {
+        if self.handlers_by_name.contains_key(S::NAME) {
+            return Err(Error::HandlerAlreadyRegistered(S::NAME));
+        }
+        self.handlers_by_name.insert(
+            S::NAME.to_string(),
+            Arc::new(Box::new(|| Box::new(S::default()))),
+        );
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Option<Box<dyn AnySchedulable>> {
+        self.handlers_by_name.get(name).map(|f| f())
+    }
 }
 
 #[derive(Debug)]
@@ -173,25 +247,23 @@ where
 {
     fn new(backend: Backend, rate: Duration) -> Self {
         let handle_comms = unbounded_channel();
-        let queues_by_name = vec![Queue::new(QueueName::from("default"), backend.clone())]
-            .into_iter()
-            .map(|queue| (queue.name.clone(), Mutex::new(queue)))
-            .collect();
         Self {
             timer_handle: None,
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
-            inner: Arc::new(ManagerInner { queues_by_name }),
+            inner: None,
             rate,
             backend,
+            handlers: Handlers::default(),
         }
     }
 
-    // pub fn register<S>(&mut self) -> Result<()>
-    // where
-    //     S: Schedulable,
-    // {
-    //     Ok(())
-    // }
+    pub fn register<S>(&mut self) -> Result<()>
+    where
+        S: Schedulable + 'static,
+    {
+        self.handlers.register::<S>()?;
+        Ok(())
+    }
 
     fn action_tx(&self) -> UnboundedSender<ManagerAction> {
         self.handle_comms.0.clone()
@@ -201,7 +273,7 @@ where
         debug!("sending message to drain manager");
         self.handle_comms.0.send(ManagerAction::Stop).unwrap(); // todo handle error
 
-        for queue in self.inner.queues_by_name.values() {
+        for queue in self.inner.as_ref().unwrap().queues_by_name.values() {
             // todo handle error
             let mut queue = queue.lock().await;
             if let Err(e) = queue.drain(from_backend).await {
@@ -222,10 +294,25 @@ where
             warn!("already started");
             return;
         }
+
+        let queues_by_name = vec![Queue::new(
+            QueueName::from("default"),
+            self.backend.clone(),
+            self.handlers.clone(),
+        )]
+        .into_iter()
+        .map(|queue| (queue.name.clone(), Mutex::new(queue)))
+        .collect();
+
+        self.inner = Some(Arc::new(ManagerInner { queues_by_name }));
+
         self.timer_handle = Some(tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
             let rate = self.rate;
-            let inner = self.inner.clone();
+            let inner = match &self.inner {
+                Some(v) => v.clone(),
+                _ => todo!(),
+            };
             async move {
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {

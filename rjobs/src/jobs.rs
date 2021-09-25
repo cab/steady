@@ -6,11 +6,13 @@ use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-#[rjobs_typetag::serde(tag = "job_type")]
 #[async_trait::async_trait]
-pub trait Schedulable: Send + Sync {
+pub trait Schedulable: Send + Sync + Default {
+    const NAME: &'static str;
+    type Arg: prost::Message + Default;
+    type Error: std::fmt::Debug;
     // : Serialize + DeserializeOwned {
-    async fn perform(&mut self) -> std::result::Result<(), Error>;
+    async fn perform(&mut self, arg: Self::Arg) -> std::result::Result<(), Self::Error>;
 }
 
 #[derive(Debug)]
@@ -28,7 +30,8 @@ impl JobId {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobDefinition {
     pub(crate) id: JobId,
-    pub(crate) serialized_job: Vec<u8>,
+    pub(crate) serialized_job_data: Vec<u8>,
+    pub(crate) job_name: String,
     enqueued_at: DateTime<Utc>,
     pub(crate) queue: QueueName,
     #[serde(skip)]
@@ -39,6 +42,7 @@ impl std::fmt::Debug for JobDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobDefinition")
             .field("id", &self.id)
+            .field("job_name", &self.job_name)
             .field("enqueued_at", &self.enqueued_at)
             .field("debug", &self.debug)
             .finish()
@@ -60,14 +64,19 @@ impl JobDefinitionDebug {
 
 impl JobDefinition {
     pub(crate) fn new<S>(
-        job: &dyn Schedulable,
+        job_data: &S,
+        job_name: String,
         queue: QueueName,
         enqueued_at: DateTime<Utc>,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        S: prost::Message,
+    {
         let id = JobId::random();
-        let serialized_job = bincode::serialize(job)?;
+        let serialized_job_data = job_data.encode_to_vec();
         Ok(Self {
-            serialized_job,
+            serialized_job_data,
+            job_name,
             queue,
             id,
             enqueued_at,

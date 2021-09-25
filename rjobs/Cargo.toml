@@ -15,6 +15,7 @@ thiserror = "^1.0"
 tokio = {version = "^1.0", features = ["time", "sync"]}
 tracing = "^0.1"
 # typetag = "^0.1"
+prost = "0.8"
 rjobs-typetag = {path = "../typetag"}
 
 [dev-dependencies]
