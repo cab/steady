@@ -1,10 +1,11 @@
 use crate::{
     backends,
-    error::Result,
-    jobs::{self, JobDefinition, Schedulable},
+    error::{Result, StdError},
+    jobs::{self, JobDefinition, JobHandler, JobId},
     Error,
 };
 use chrono::Duration;
+use futures::{Stream, StreamExt, TryStreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{any::Any, collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
@@ -16,14 +17,23 @@ use tokio::{
         Mutex,
     },
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
-#[derive(Debug)]
 struct Queue<Backend> {
     handlers: Handlers,
     name: QueueName,
     jobs: VecDeque<jobs::JobDefinition>,
     backend: Backend,
+}
+
+impl<Backend> std::fmt::Debug for Queue<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Queue")
+            .field("name", &self.name)
+            .field("jobs", &self.jobs)
+            .field("handlers", &self.handlers)
+            .finish()
+    }
 }
 
 impl<Backend> Queue<Backend>
@@ -39,28 +49,46 @@ where
         }
     }
 
+    #[instrument]
     pub(crate) async fn process(&mut self) -> Result<()> {
         let max_pending_jobs = 3; //todo configurable
         if self.jobs.len() < max_pending_jobs {
             self.pull(NonZeroUsize::new(max_pending_jobs).unwrap())
                 .await?;
         }
-        self.run_next_job().await?;
+        self.run_jobs().await?;
         Ok(())
     }
 
-    async fn run_next_job(&mut self) -> Result<()> {
-        if let Some(next_job) = self.jobs.pop_front() {
-            info!("running job: {:?}", next_job);
-            self.handlers
-                .get(&next_job.job_name)
-                .unwrap()
-                .perform(&next_job.serialized_job_data)
-                .await?;
+    #[instrument]
+    async fn run_jobs(&mut self) -> Result<()> {
+        let handlers = &self.handlers.clone();
+        let jobs = std::mem::take(&mut self.jobs);
+        let errors = futures::stream::iter(jobs)
+            .then(|next_job| async move {
+                info!("running job: {:?}", next_job);
+                match handlers.get(&next_job.job_name) {
+                    Some(mut handler) => handler.perform(&next_job.serialized_job_data).await,
+                    None => Err(Error::NoHandler(next_job.id, next_job.job_name.clone())),
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .partition::<Vec<_>, _>(Result::is_ok)
+            .1 // errors
+            .into_iter()
+            .map(Result::unwrap_err)
+            .collect::<Vec<_>>();
+
+        if !errors.is_empty() {
+            return Err(Error::JobFailures(errors));
         }
+
         Ok(())
     }
 
+    #[instrument]
     pub(crate) async fn drain(&mut self, from_backend: bool) -> Result<()> {
         info!("draining {}", self.name);
         if from_backend {
@@ -78,11 +106,7 @@ where
                 }
             }
         }
-        while !self.jobs.is_empty() {
-            if let Err(e) = self.run_next_job().await {
-                warn!("job failed: {}", e);
-            }
-        }
+        self.run_jobs().await?;
         Ok(())
     }
 
@@ -90,6 +114,7 @@ where
         self.jobs.extend(jobs);
     }
 
+    #[instrument(skip(self))]
     async fn pull(&mut self, count: NonZeroUsize) -> Result<usize> {
         let job_defs = self.backend.pull(&self.name, count).await?;
         let count = job_defs.len();
@@ -103,6 +128,15 @@ pub struct Scheduler<Backend> {
     backend: Backend,
     poller: Poller<Backend>,
     manager: Manager<Backend>,
+}
+
+impl<Backend> std::fmt::Debug for Scheduler<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("poller", &self.poller)
+            .field("manager", &self.manager)
+            .finish()
+    }
 }
 
 impl<Backend> Scheduler<Backend>
@@ -121,7 +155,7 @@ where
 
     pub fn register<S>(&mut self) -> Result<()>
     where
-        S: Schedulable + 'static,
+        S: JobHandler + 'static,
     {
         self.manager.register::<S>()
     }
@@ -131,6 +165,7 @@ where
         self.poller.start();
     }
 
+    #[instrument]
     pub async fn drain(&mut self, from_backend: bool) -> Result<()> {
         if let Err(e) = self.poller.stop().await {
             error!("failed to stop poller: {}", e);
@@ -141,12 +176,12 @@ where
         Ok(())
     }
 
-    pub async fn schedule<R, S>(&self, job_data: &S, queue: QueueName) -> Result<jobs::JobId>
+    #[instrument]
+    pub async fn schedule<R>(&self, job_data: &R::Arg, queue: QueueName) -> Result<jobs::JobId>
     where
-        R: Schedulable,
-        S: prost::Message,
+        R: JobHandler,
     {
-        let job_def = jobs::JobDefinition::new::<S>(
+        let job_def = jobs::JobDefinition::new::<R::Arg>(
             job_data,
             R::NAME.to_string(),
             queue,
@@ -158,7 +193,6 @@ where
     }
 }
 
-#[derive(Debug)]
 struct Manager<Backend> {
     rate: Duration,
     handle_comms: (
@@ -171,17 +205,26 @@ struct Manager<Backend> {
     handlers: Handlers,
 }
 
+impl<Backend> std::fmt::Debug for Manager<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Manager")
+            .field("rate", &self.rate)
+            .field("handlers", &self.handlers)
+            .finish()
+    }
+}
+
 #[async_trait::async_trait]
-trait AnySchedulable: Send + Sync {
+trait AnyJobHandler: Send + Sync {
     async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()>;
 }
 
 #[async_trait::async_trait]
-impl<T, A, E> AnySchedulable for T
+impl<T, A, E> AnyJobHandler for T
 where
     A: prost::Message + Default,
-    E: std::fmt::Debug,
-    T: Schedulable<Arg = A, Error = E> + 'static,
+    E: Into<StdError> + Send + Sync,
+    T: JobHandler<Arg = A, Error = E> + 'static,
 {
     async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()> {
         let proto = A::decode(serialized_job_data).unwrap(); // todo
@@ -189,8 +232,7 @@ where
         match T::perform(&mut runner, proto).await {
             Ok(_) => {}
             Err(e) => {
-                // todo constraint error type to std::error::Error?
-                error!("job failed: {:?}", e);
+                return Err(Error::JobFailed(e.into()));
             }
         }
         Ok(())
@@ -199,7 +241,7 @@ where
 
 #[derive(Default, Clone)]
 struct Handlers {
-    handlers_by_name: HashMap<String, Arc<Box<dyn Fn() -> Box<dyn AnySchedulable> + Send + Sync>>>,
+    handlers_by_name: HashMap<String, Arc<Box<dyn Fn() -> Box<dyn AnyJobHandler> + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -213,10 +255,12 @@ impl std::fmt::Debug for Handlers {
 impl Handlers {
     fn register<S>(&mut self) -> Result<()>
     where
-        S: Schedulable + 'static,
+        S: JobHandler + 'static,
     {
         if self.handlers_by_name.contains_key(S::NAME) {
-            return Err(Error::HandlerAlreadyRegistered(S::NAME));
+            let err = Error::HandlerAlreadyRegistered(S::NAME);
+            warn!("{}", err);
+            return Err(err);
         }
         self.handlers_by_name.insert(
             S::NAME.to_string(),
@@ -225,7 +269,7 @@ impl Handlers {
         Ok(())
     }
 
-    fn get(&self, name: &str) -> Option<Box<dyn AnySchedulable>> {
+    fn get(&self, name: &str) -> Option<Box<dyn AnyJobHandler>> {
         self.handlers_by_name.get(name).map(|f| f())
     }
 }
@@ -259,7 +303,7 @@ where
 
     pub fn register<S>(&mut self) -> Result<()>
     where
-        S: Schedulable + 'static,
+        S: JobHandler + 'static,
     {
         self.handlers.register::<S>()?;
         Ok(())
@@ -351,13 +395,18 @@ where
     }
 }
 
-#[derive(Debug)]
 struct Poller<Backend> {
     rate: Duration,
     backend: Backend,
     manager_tx: UnboundedSender<ManagerAction>,
     handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl<Backend> std::fmt::Debug for Poller<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Poller").field("rate", &self.rate).finish()
+    }
 }
 
 // todo better name

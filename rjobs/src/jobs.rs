@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, StdError},
     scheduler::QueueName,
 };
 use chrono::{DateTime, Utc};
@@ -7,10 +7,10 @@ use nanoid::nanoid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[async_trait::async_trait]
-pub trait Schedulable: Send + Sync + Default {
+pub trait JobHandler: Send + Sync + Default {
     const NAME: &'static str;
     type Arg: prost::Message + Default;
-    type Error: std::fmt::Debug;
+    type Error: Into<StdError> + Send + Sync;
     // : Serialize + DeserializeOwned {
     async fn perform(&mut self, arg: Self::Arg) -> std::result::Result<(), Self::Error>;
 }
@@ -20,6 +20,12 @@ pub struct Job {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobId(String);
+
+impl std::fmt::Display for JobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("job_id:{}", self.0))
+    }
+}
 
 impl JobId {
     fn random() -> Self {
