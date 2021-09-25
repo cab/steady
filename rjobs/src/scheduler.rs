@@ -22,7 +22,8 @@ use tracing::{debug, error, info, instrument, warn};
 struct Queue<Backend> {
     handlers: Handlers,
     name: QueueName,
-    jobs: VecDeque<jobs::JobDefinition>,
+    manager_tx: UnboundedSender<ManagerAction>,
+    pulled_jobs: VecDeque<jobs::JobDefinition>,
     backend: Backend,
 }
 
@@ -30,7 +31,7 @@ impl<Backend> std::fmt::Debug for Queue<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Queue")
             .field("name", &self.name)
-            .field("jobs", &self.jobs)
+            .field("pulled_jobs", &self.pulled_jobs)
             .field("handlers", &self.handlers)
             .finish()
     }
@@ -40,9 +41,15 @@ impl<Backend> Queue<Backend>
 where
     Backend: backends::Backend,
 {
-    fn new(name: QueueName, backend: Backend, handlers: Handlers) -> Self {
+    fn new(
+        name: QueueName,
+        backend: Backend,
+        handlers: Handlers,
+        manager_tx: UnboundedSender<ManagerAction>,
+    ) -> Self {
         Self {
-            jobs: VecDeque::new(),
+            pulled_jobs: VecDeque::new(),
+            manager_tx,
             name,
             backend,
             handlers,
@@ -52,7 +59,7 @@ where
     #[instrument]
     pub(crate) async fn process(&mut self) -> Result<()> {
         let max_pending_jobs = 3; //todo configurable
-        if self.jobs.len() < max_pending_jobs {
+        if self.pulled_jobs.len() < max_pending_jobs {
             self.pull(NonZeroUsize::new(max_pending_jobs).unwrap())
                 .await?;
         }
@@ -63,7 +70,7 @@ where
     #[instrument]
     async fn run_jobs(&mut self) -> Result<()> {
         let handlers = &self.handlers.clone();
-        let jobs = std::mem::take(&mut self.jobs);
+        let jobs = std::mem::take(&mut self.pulled_jobs);
         let errors = futures::stream::iter(jobs)
             .then(|next_job| async move {
                 info!("running job: {:?}", next_job);
@@ -111,7 +118,7 @@ where
     }
 
     fn append_jobs(&mut self, jobs: impl IntoIterator<Item = JobDefinition>) {
-        self.jobs.extend(jobs);
+        self.pulled_jobs.extend(jobs);
     }
 
     #[instrument(skip(self))]
@@ -343,6 +350,7 @@ where
             QueueName::from("default"),
             self.backend.clone(),
             self.handlers.clone(),
+            self.action_tx(),
         )]
         .into_iter()
         .map(|queue| (queue.name.clone(), Mutex::new(queue)))
