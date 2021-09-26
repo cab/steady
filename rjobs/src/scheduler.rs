@@ -170,6 +170,10 @@ where
         self.manager.register_handler::<S>()
     }
 
+    pub(crate) fn action_tx(&self) -> UnboundedSender<ManagerAction> {
+        self.manager.action_tx()
+    }
+
     pub fn start(&mut self) {
         self.manager.start();
         self.poller.start();
@@ -240,13 +244,9 @@ where
     async fn perform(&mut self, job: &JobDefinition) -> Result<()> {
         let proto = A::decode(job.serialized_job_data.as_slice()).unwrap(); // todo
         let mut runner = T::default();
-        match T::perform(&mut runner, proto).await {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(Error::JobFailed(job.clone(), e.into()));
-            }
-        }
-        Ok(())
+        T::perform(&mut runner, proto)
+            .await
+            .map_err(|e| Error::JobFailed(job.clone(), e.into()))
     }
 }
 
@@ -291,7 +291,7 @@ struct ManagerInner<Backend> {
 }
 
 #[derive(Debug)]
-enum ManagerAction {
+pub(crate) enum ManagerAction {
     Stop,
     PushJobs(Vec<JobDefinition>),
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rjobs::{JobHandler, QueueName, RedisBackend, Scheduler};
+use rjobs::{CronScheduler, JobHandler, QueueName, RedisBackend, Scheduler};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
         .init();
     const REDIS_URL: &'static str = "redis://127.0.0.1";
     let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
+    let mut cron = CronScheduler::for_scheduler(&scheduler);
     scheduler.register_handler::<Log>()?;
     scheduler.register_handler::<Log2>()?;
     scheduler.start();
