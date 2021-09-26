@@ -23,7 +23,7 @@ pub struct JobId(String);
 
 impl std::fmt::Display for JobId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("job_id:{}", self.0))
+        f.write_fmt(format_args!("{}", self.0))
     }
 }
 
@@ -40,8 +40,6 @@ pub struct JobDefinition {
     pub(crate) job_name: String,
     enqueued_at: DateTime<Utc>,
     pub(crate) queue: QueueName,
-    #[serde(skip)]
-    debug: Option<JobDefinitionDebug>,
 }
 
 impl std::fmt::Debug for JobDefinition {
@@ -50,21 +48,7 @@ impl std::fmt::Debug for JobDefinition {
             .field("id", &self.id)
             .field("job_name", &self.job_name)
             .field("enqueued_at", &self.enqueued_at)
-            .field("debug", &self.debug)
             .finish()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct JobDefinitionDebug {
-    job_type_name: &'static str,
-}
-
-impl JobDefinitionDebug {
-    fn new<T>() -> Self {
-        Self {
-            job_type_name: std::any::type_name::<T>(),
-        }
     }
 }
 
@@ -86,7 +70,6 @@ impl JobDefinition {
             queue,
             id,
             enqueued_at,
-            debug: Some(JobDefinitionDebug::new::<S>()),
         })
     }
 }

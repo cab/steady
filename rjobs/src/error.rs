@@ -1,4 +1,4 @@
-use crate::jobs::JobId;
+use crate::jobs::{JobDefinition, JobId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -8,10 +8,10 @@ pub enum Error {
     Serialization(#[from] bincode::Error),
     #[error("handler already registered for name '{0}'")]
     HandlerAlreadyRegistered(&'static str),
-    #[error("handler not found for name '{1}' when running job {0}")]
-    NoHandler(JobId, String),
-    #[error("job failed: {0}")]
-    JobFailed(#[source] StdError),
+    #[error("handler not found for job {0:?}")]
+    NoHandler(JobDefinition),
+    #[error("job {} ({}) failed: {}", .0.job_name, .0.id, .1)]
+    JobFailed(JobDefinition, #[source] StdError),
     #[error("job failures: {0:?}")]
     JobFailures(Vec<Error>),
 }

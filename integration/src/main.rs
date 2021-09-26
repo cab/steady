@@ -31,8 +31,7 @@ impl JobHandler for Log2 {
     type Error = anyhow::Error;
 
     async fn perform(&mut self, arg: Self::Arg) -> Result<(), Self::Error> {
-        tracing::info!("log2! {:?}", arg.message);
-        Ok(())
+        Err(anyhow::anyhow!("test failure"))
     }
 }
 
@@ -40,13 +39,13 @@ impl JobHandler for Log2 {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .pretty()
-        .with_thread_names(true)
+        // .json()
         .with_max_level(tracing::Level::TRACE)
         .init();
     const REDIS_URL: &'static str = "redis://127.0.0.1";
     let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
-    scheduler.register::<Log>()?;
-    scheduler.register::<Log2>()?;
+    scheduler.register_handler::<Log>()?;
+    scheduler.register_handler::<Log2>()?;
     scheduler.start();
     let job_id = scheduler
         .schedule::<Log>(

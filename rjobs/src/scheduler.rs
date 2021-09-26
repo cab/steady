@@ -17,7 +17,7 @@ use tokio::{
         Mutex,
     },
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 
 struct Queue<Backend> {
     handlers: Handlers,
@@ -56,28 +56,32 @@ where
         }
     }
 
-    #[instrument]
+    #[instrument(name = "process_queue", skip(self), fields(queue_name = %self.name))]
     pub(crate) async fn process(&mut self) -> Result<()> {
         let max_pending_jobs = 3; //todo configurable
         if self.pulled_jobs.len() < max_pending_jobs {
             self.pull(NonZeroUsize::new(max_pending_jobs).unwrap())
                 .await?;
         }
-        self.run_jobs().await?;
+        self.run_pulled_jobs().await?;
         Ok(())
     }
 
-    #[instrument]
-    async fn run_jobs(&mut self) -> Result<()> {
+    #[instrument(skip(self), fields(pulled_jobs = ?self.pulled_jobs))]
+    async fn run_pulled_jobs(&mut self) -> Result<()> {
         let handlers = &self.handlers.clone();
         let jobs = std::mem::take(&mut self.pulled_jobs);
         let errors = futures::stream::iter(jobs)
-            .then(|next_job| async move {
-                info!("running job: {:?}", next_job);
-                match handlers.get(&next_job.job_name) {
-                    Some(mut handler) => handler.perform(&next_job.serialized_job_data).await,
-                    None => Err(Error::NoHandler(next_job.id, next_job.job_name.clone())),
+            .then(|next_job| {
+                // TODO can we use this in `instrument` without cloning?
+                let job = next_job.clone();
+                async move {
+                    match handlers.get(&next_job.job_name) {
+                        Some(mut handler) => handler.perform(&next_job).await,
+                        None => Err(Error::NoHandler(next_job)),
+                    }
                 }
+                .instrument(tracing::info_span!("run_pulled_job", job = ?job))
             })
             .collect::<Vec<_>>()
             .await
@@ -95,9 +99,8 @@ where
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(name = "drain_queue", skip(self), fields(queue_name = %self.name))]
     pub(crate) async fn drain(&mut self, from_backend: bool) -> Result<()> {
-        info!("draining {}", self.name);
         if from_backend {
             loop {
                 match self.pull(NonZeroUsize::new(100).unwrap()).await {
@@ -113,7 +116,7 @@ where
                 }
             }
         }
-        self.run_jobs().await?;
+        self.run_pulled_jobs().await?;
         Ok(())
     }
 
@@ -122,10 +125,10 @@ where
     }
 
     #[instrument(skip(self))]
-    async fn pull(&mut self, count: NonZeroUsize) -> Result<usize> {
-        let job_defs = self.backend.pull(&self.name, count).await?;
+    async fn pull(&mut self, limit: NonZeroUsize) -> Result<usize> {
+        let job_defs = self.backend.pull(&self.name, limit).await?;
         let count = job_defs.len();
-        debug!("pulled {} jobs", count);
+        trace!("pulled {} jobs", count);
         self.append_jobs(job_defs);
         Ok(count)
     }
@@ -160,11 +163,11 @@ where
         })
     }
 
-    pub fn register<S>(&mut self) -> Result<()>
+    pub fn register_handler<S>(&mut self) -> Result<()>
     where
         S: JobHandler + 'static,
     {
-        self.manager.register::<S>()
+        self.manager.register_handler::<S>()
     }
 
     pub fn start(&mut self) {
@@ -172,7 +175,7 @@ where
         self.poller.start();
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub async fn drain(&mut self, from_backend: bool) -> Result<()> {
         if let Err(e) = self.poller.stop().await {
             error!("failed to stop poller: {}", e);
@@ -223,7 +226,7 @@ impl<Backend> std::fmt::Debug for Manager<Backend> {
 
 #[async_trait::async_trait]
 trait AnyJobHandler: Send + Sync {
-    async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()>;
+    async fn perform(&mut self, job: &JobDefinition) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -233,13 +236,14 @@ where
     E: Into<StdError> + Send + Sync,
     T: JobHandler<Arg = A, Error = E> + 'static,
 {
-    async fn perform(&mut self, serialized_job_data: &[u8]) -> Result<()> {
-        let proto = A::decode(serialized_job_data).unwrap(); // todo
+    #[instrument(skip(self))]
+    async fn perform(&mut self, job: &JobDefinition) -> Result<()> {
+        let proto = A::decode(job.serialized_job_data.as_slice()).unwrap(); // todo
         let mut runner = T::default();
         match T::perform(&mut runner, proto).await {
             Ok(_) => {}
             Err(e) => {
-                return Err(Error::JobFailed(e.into()));
+                return Err(Error::JobFailed(job.clone(), e.into()));
             }
         }
         Ok(())
@@ -308,7 +312,7 @@ where
         }
     }
 
-    pub fn register<S>(&mut self) -> Result<()>
+    pub fn register_handler<S>(&mut self) -> Result<()>
     where
         S: JobHandler + 'static,
     {
@@ -320,8 +324,9 @@ where
         self.handle_comms.0.clone()
     }
 
+    #[instrument]
     async fn drain(&mut self, from_backend: bool) -> Result<()> {
-        debug!("sending message to drain manager");
+        trace!("sending message to drain manager");
         self.handle_comms.0.send(ManagerAction::Stop).unwrap(); // todo handle error
 
         for queue in self.inner.as_ref().unwrap().queues_by_name.values() {
@@ -340,6 +345,7 @@ where
         Ok(())
     }
 
+    #[instrument]
     fn start(&mut self) {
         if self.timer_handle.is_some() {
             warn!("already started");
@@ -369,6 +375,7 @@ where
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {
                     if let Ok(action) = rx.try_recv() {
+                        debug!("manager received action: {:?}", action);
                         match action {
                             ManagerAction::Stop => {
                                 info!("manager stopping");
@@ -399,6 +406,7 @@ where
                 }
                 Result::Ok(())
             }
+            .instrument(tracing::info_span!("manager_loop_task"))
         }));
     }
 }
@@ -447,8 +455,9 @@ where
         }
     }
 
+    #[instrument]
     async fn stop(&mut self) -> Result<()> {
-        debug!("sending message to stop poller");
+        trace!("sending message to stop poller");
         self.handle_comms.0.send(()).unwrap(); // todo handle error
         if let Some(handle) = self.timer_handle.take() {
             let output = handle.await.unwrap(); // TODO handle error
@@ -460,6 +469,7 @@ where
         Ok(())
     }
 
+    #[instrument]
     fn start(&mut self) {
         if self.timer_handle.is_some() {
             warn!("already started");
@@ -493,6 +503,7 @@ where
                 }
                 Result::Ok(())
             }
+            .instrument(tracing::info_span!("poller_loop_task"))
         }));
     }
 }
@@ -508,7 +519,7 @@ impl QueueName {
 
 impl std::fmt::Display for QueueName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("queue:{}", self.0))
+        f.write_fmt(format_args!("{}", self.0))
     }
 }
 

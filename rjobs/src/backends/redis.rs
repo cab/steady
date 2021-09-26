@@ -72,7 +72,7 @@ impl ToRedisArgs for QueueName {
     where
         W: ?Sized + RedisWrite,
     {
-        let key = format!("queue:{}", self.as_str());
+        let key = format!("rjobs_queue:{}", self.as_str());
         out.write_arg(key.as_bytes());
     }
 }
