@@ -1,5 +1,5 @@
 [package]
-descripion = "job queue"
+description = "job queue"
 edition = "2018"
 license = "Apache-2.0"
 name = "steady"
