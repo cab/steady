@@ -138,8 +138,10 @@ where
     async fn pull(&mut self, limit: NonZeroUsize) -> Result<usize> {
         let job_defs = self.backend.pull(&self.name, limit).await?;
         let count = job_defs.len();
-        trace!("pulled {} jobs", count);
-        self.append_jobs(job_defs);
+        trace!("pulled {} job{}", count, if count == 1 { "" } else { "s" });
+        if count > 0 {
+            self.append_jobs(job_defs);
+        }
         Ok(count)
     }
 }
@@ -517,8 +519,10 @@ where
 
                     match inner.poll().await {
                         Ok(jobs) => {
-                            manager_tx.send(ManagerAction::PushJobs(jobs)).unwrap();
-                            // todo error handle
+                            if !jobs.is_empty() {
+                                manager_tx.send(ManagerAction::PushJobs(jobs)).unwrap();
+                                // todo error handle
+                            }
                         }
                         Err(e) => {
                             todo!("{}", e);

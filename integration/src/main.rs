@@ -1,8 +1,8 @@
 use anyhow::Result;
-use rjobs::{
+use serde::{Deserialize, Serialize};
+use steady::{
     Consumer, CronScheduler, ErrorHandler, JobHandler, JobId, Producer, QueueName, RedisBackend,
 };
-use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 #[derive(Default)]
@@ -12,7 +12,7 @@ pub mod protos {
     include!(concat!(env!("OUT_DIR"), "/integration.jobs.rs"));
 }
 
-#[rjobs::async_trait]
+#[steady::async_trait]
 impl JobHandler for Log {
     const NAME: &'static str = "log";
     type Arg = protos::Log;
@@ -27,7 +27,7 @@ impl JobHandler for Log {
 #[derive(Default)]
 struct Log2 {}
 
-#[rjobs::async_trait]
+#[steady::async_trait]
 impl JobHandler for Log2 {
     const NAME: &'static str = "log2";
     type Arg = protos::Log;
@@ -41,8 +41,8 @@ impl JobHandler for Log2 {
 struct JobErrorHandler;
 
 impl ErrorHandler for JobErrorHandler {
-    fn job_failed(&self, job_id: &JobId, job_name: &str, error: &rjobs::Error) {
-        warn!("JOB FAILEDDDDDD");
+    fn job_failed(&self, job_id: &JobId, job_name: &str, error: &steady::Error) {
+        warn!("JOB FAILEDDDDDD {} - {}: {}", job_id, job_name, error);
     }
 }
 
@@ -60,12 +60,11 @@ async fn main() -> Result<()> {
     consumer.register_handler::<Log>()?;
     consumer.register_handler::<Log2>()?;
     consumer.start();
-    // let mut cron = CronScheduler::for_scheduler(&scheduler);
 
-    let mut producer = Producer::new(backend.clone());
-
+    let producer = Producer::new(backend.clone());
+    let mut cron = CronScheduler::for_producer(&producer);
     let job_id = producer
-        .schedule_for_handler::<Log>(
+        .enqueue_for_handler::<Log>(
             &protos::Log {
                 message: Some("hi".to_string()),
             },
@@ -73,7 +72,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     let job_id = producer
-        .schedule::<protos::Log>(
+        .enqueue::<protos::Log>(
             "log2",
             &protos::Log {
                 message: Some("hello".to_string()),
@@ -83,7 +82,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let job_id = producer
-        .schedule::<protos::Log>(
+        .enqueue::<protos::Log>(
             "log-no-handler",
             &protos::Log {
                 message: Some("hello".to_string()),
@@ -92,6 +91,8 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    consumer.drain(true).await?;
+    // consumer.drain(true).await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(100)).await;
     Ok(())
 }

@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
+use redis::{aio::ConnectionLike, AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 use tracing::warn;
 
 use crate::{jobs::JobDefinition, QueueName, Result};
@@ -58,7 +58,7 @@ impl super::Backend for Backend {
         Ok(job_defs)
     }
 
-    async fn schedule(&self, job_def: &JobDefinition) -> Result<()> {
+    async fn enqueue(&self, job_def: &JobDefinition) -> Result<()> {
         let mut connection = self.redis_client.get_async_connection().await?;
         let () = connection
             .lpush(&job_def.queue, job_definition_to_redis_args(job_def)?)
@@ -72,7 +72,21 @@ impl ToRedisArgs for QueueName {
     where
         W: ?Sized + RedisWrite,
     {
-        let key = format!("rjobs_queue:{}", self.as_str());
+        let key = format!("steady_queue:{}", self.as_str());
         out.write_arg(key.as_bytes());
     }
+}
+
+async fn lock(connection: &mut redis::aio::Connection, key: &str) -> Result<()> {
+    const value: &'static str = "lock";
+    let result = redis::cmd("set")
+        .arg(key)
+        .arg(value)
+        .arg("ex")
+        .arg(100)
+        .arg("nx")
+        .query_async::<_, Option<String>>(connection)
+        .await?;
+    panic!("well {:?}", result);
+    Ok(())
 }

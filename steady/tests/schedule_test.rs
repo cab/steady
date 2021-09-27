@@ -1,6 +1,6 @@
 use anyhow::Result;
-use rjobs::{Consumer, JobHandler, MemoryBackend, QueueName, RedisBackend};
 use serde::{Deserialize, Serialize};
+use steady::{Consumer, JobHandler, MemoryBackend, QueueName, RedisBackend};
 use test_env_log::test as logtest;
 
 const REDIS_URL: &'static str = "redis://127.0.0.1";
@@ -8,7 +8,7 @@ const REDIS_URL: &'static str = "redis://127.0.0.1";
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct Log {}
 
-#[rjobs::async_trait]
+#[steady::async_trait]
 impl JobHandler for Log {
     const NAME: &'static str = "log";
     type Arg = String;

@@ -16,7 +16,7 @@ impl<Backend> CronScheduler<Backend>
 where
     Backend: backends::Backend + 'static,
 {
-    pub fn for_scheduler(producer: &Producer<Backend>) -> Self {
+    pub fn for_producer(producer: &Producer<Backend>) -> Self {
         Self::new(producer.action_tx())
     }
 

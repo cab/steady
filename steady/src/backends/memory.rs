@@ -29,7 +29,7 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn schedule(&self, job_def: &JobDefinition) -> Result<()> {
+    async fn enqueue(&self, job_def: &JobDefinition) -> Result<()> {
         self.jobs_by_queue
             .lock()
             .unwrap() // todo

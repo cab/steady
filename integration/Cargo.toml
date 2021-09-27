@@ -1,12 +1,12 @@
 [package]
 edition = "2018"
-name = "rjobs-integration"
+name = "steady-integration"
 version = "0.1.0"
 
 [dependencies]
 anyhow = "^1.0"
 prost = "0.8"
-rjobs = {path = "../rjobs"}
+steady = {path = "../steady"}
 serde = {version = "^1.0", features = ["derive"]}
 tokio = {version = "^1.0", features = ["full"]}
 tracing = "*"

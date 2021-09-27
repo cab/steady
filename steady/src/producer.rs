@@ -36,7 +36,7 @@ where
     }
 
     #[instrument(skip(self))]
-    pub async fn schedule<A>(
+    pub async fn enqueue<A>(
         &self,
         job_name: &str,
         job_data: &A,
@@ -48,12 +48,12 @@ where
         let job_def =
             jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
         debug!("scheduling {:?}", job_def);
-        self.backend.schedule(&job_def).await?;
+        self.backend.enqueue(&job_def).await?;
         Ok(job_def.id)
     }
 
     #[instrument(skip(self))]
-    pub async fn schedule_for_handler<T>(
+    pub async fn enqueue_for_handler<T>(
         &self,
         job_data: &T::Arg,
         queue: QueueName,
@@ -61,6 +61,6 @@ where
     where
         T: JobHandler,
     {
-        self.schedule::<T::Arg>(T::NAME, job_data, queue).await
+        self.enqueue::<T::Arg>(T::NAME, job_data, queue).await
     }
 }
