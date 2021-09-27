@@ -2,7 +2,7 @@ use crate::{
     backends,
     error::{Result, StdError},
     jobs::{self, JobDefinition, JobHandler, JobId},
-    Error,
+    Error, QueueName,
 };
 use chrono::Duration;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -134,13 +134,13 @@ where
     }
 }
 
-pub struct Scheduler<Backend> {
+pub struct Consumer<Backend> {
     backend: Backend,
     poller: Poller<Backend>,
     manager: Manager<Backend>,
 }
 
-impl<Backend> std::fmt::Debug for Scheduler<Backend> {
+impl<Backend> std::fmt::Debug for Consumer<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scheduler")
             .field("poller", &self.poller)
@@ -149,7 +149,7 @@ impl<Backend> std::fmt::Debug for Scheduler<Backend> {
     }
 }
 
-impl<Backend> Scheduler<Backend>
+impl<Backend> Consumer<Backend>
 where
     Backend: backends::Backend + 'static,
 {
@@ -188,22 +188,6 @@ where
             error!("failed to stop manager: {}", e);
         }
         Ok(())
-    }
-
-    #[instrument]
-    pub async fn schedule<R>(&self, job_data: &R::Arg, queue: QueueName) -> Result<jobs::JobId>
-    where
-        R: JobHandler,
-    {
-        let job_def = jobs::JobDefinition::new::<R::Arg>(
-            job_data,
-            R::NAME.to_string(),
-            queue,
-            chrono::Utc::now(),
-        )?;
-        debug!("scheduling {:?}", job_def);
-        self.backend.schedule(&job_def).await?;
-        Ok(job_def.id)
     }
 }
 
@@ -505,29 +489,5 @@ where
             }
             .instrument(tracing::info_span!("poller_loop_task"))
         }));
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct QueueName(String);
-
-impl QueueName {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for QueueName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}", self.0))
-    }
-}
-
-impl<S> From<S> for QueueName
-where
-    S: Into<String>,
-{
-    fn from(s: S) -> Self {
-        Self(s.into())
     }
 }

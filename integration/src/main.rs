@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rjobs::{CronScheduler, JobHandler, QueueName, RedisBackend, Scheduler};
+use rjobs::{Consumer, CronScheduler, JobHandler, Producer, QueueName, RedisBackend};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default)]
@@ -43,12 +43,16 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::TRACE)
         .init();
     const REDIS_URL: &'static str = "redis://127.0.0.1";
-    let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
-    let mut cron = CronScheduler::for_scheduler(&scheduler);
-    scheduler.register_handler::<Log>()?;
-    scheduler.register_handler::<Log2>()?;
-    scheduler.start();
-    let job_id = scheduler
+    let backend = RedisBackend::new(REDIS_URL)?;
+    let mut consumer = Consumer::new(backend.clone())?;
+    consumer.register_handler::<Log>()?;
+    consumer.register_handler::<Log2>()?;
+    consumer.start();
+    // let mut cron = CronScheduler::for_scheduler(&scheduler);
+
+    let mut producer = Producer::new(backend.clone());
+
+    let job_id = producer
         .schedule::<Log>(
             &protos::Log {
                 message: Some("hi".to_string()),
@@ -56,7 +60,7 @@ async fn main() -> Result<()> {
             QueueName::from("default"),
         )
         .await?;
-    let job_id = scheduler
+    let job_id = producer
         .schedule::<Log2>(
             &protos::Log {
                 message: Some("hello".to_string()),
@@ -64,6 +68,7 @@ async fn main() -> Result<()> {
             QueueName::from("default"),
         )
         .await?;
-    scheduler.drain(true).await?;
+
+    consumer.drain(true).await?;
     Ok(())
 }

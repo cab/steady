@@ -4,12 +4,11 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     backends,
-    scheduler::{self, ManagerAction},
-    Scheduler,
+    producer::{Producer, ProducerAction},
 };
 
 pub struct CronScheduler<Backend> {
-    manager_tx: UnboundedSender<ManagerAction>,
+    producer_tx: UnboundedSender<ProducerAction>,
     pt: PhantomData<Backend>,
 }
 
@@ -17,13 +16,13 @@ impl<Backend> CronScheduler<Backend>
 where
     Backend: backends::Backend + 'static,
 {
-    pub fn for_scheduler(scheduler: &Scheduler<Backend>) -> Self {
-        Self::new(scheduler.action_tx())
+    pub fn for_scheduler(producer: &Producer<Backend>) -> Self {
+        Self::new(producer.action_tx())
     }
 
-    fn new(manager_tx: UnboundedSender<ManagerAction>) -> Self {
+    fn new(producer_tx: UnboundedSender<ProducerAction>) -> Self {
         Self {
-            manager_tx,
+            producer_tx,
             pt: PhantomData,
         }
     }

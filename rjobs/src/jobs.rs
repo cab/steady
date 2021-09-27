@@ -1,7 +1,4 @@
-use crate::{
-    error::{Error, Result, StdError},
-    scheduler::QueueName,
-};
+use crate::error::{Error, Result, StdError};
 use chrono::{DateTime, Utc};
 use nanoid::nanoid;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -71,5 +68,29 @@ impl JobDefinition {
             id,
             enqueued_at,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QueueName(String);
+
+impl QueueName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for QueueName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{}", self.0))
+    }
+}
+
+impl<S> From<S> for QueueName
+where
+    S: Into<String>,
+{
+    fn from(s: S) -> Self {
+        Self(s.into())
     }
 }

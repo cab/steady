@@ -1,7 +1,7 @@
 pub(crate) mod memory;
 pub(crate) mod redis;
 
-use crate::{jobs::JobDefinition, scheduler::QueueName, Result};
+use crate::{jobs::JobDefinition, QueueName, Result};
 use std::num::NonZeroUsize;
 
 #[async_trait::async_trait]

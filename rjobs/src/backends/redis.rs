@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use redis::{AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 use tracing::warn;
 
-use crate::{jobs::JobDefinition, scheduler::QueueName, Result};
+use crate::{jobs::JobDefinition, QueueName, Result};
 
 #[derive(Debug, Clone)]
 pub struct Backend {

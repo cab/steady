@@ -1,4 +1,4 @@
-use crate::{jobs::JobDefinition, scheduler::QueueName, Result};
+use crate::{jobs::JobDefinition, QueueName, Result};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
