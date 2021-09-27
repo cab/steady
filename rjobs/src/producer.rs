@@ -36,18 +36,31 @@ where
     }
 
     #[instrument(skip(self))]
-    pub async fn schedule<R>(&self, job_data: &R::Arg, queue: QueueName) -> Result<jobs::JobId>
+    pub async fn schedule<A>(
+        &self,
+        job_name: &str,
+        job_data: &A,
+        queue: QueueName,
+    ) -> Result<jobs::JobId>
     where
-        R: JobHandler,
+        A: prost::Message,
     {
-        let job_def = jobs::JobDefinition::new::<R::Arg>(
-            job_data,
-            R::NAME.to_string(),
-            queue,
-            chrono::Utc::now(),
-        )?;
+        let job_def =
+            jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
         debug!("scheduling {:?}", job_def);
         self.backend.schedule(&job_def).await?;
         Ok(job_def.id)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn schedule_for_handler<T>(
+        &self,
+        job_data: &T::Arg,
+        queue: QueueName,
+    ) -> Result<jobs::JobId>
+    where
+        T: JobHandler,
+    {
+        self.schedule::<T::Arg>(T::NAME, job_data, queue).await
     }
 }

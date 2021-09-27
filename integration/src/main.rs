@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let mut producer = Producer::new(backend.clone());
 
     let job_id = producer
-        .schedule::<Log>(
+        .schedule_for_handler::<Log>(
             &protos::Log {
                 message: Some("hi".to_string()),
             },
@@ -61,7 +61,18 @@ async fn main() -> Result<()> {
         )
         .await?;
     let job_id = producer
-        .schedule::<Log2>(
+        .schedule::<protos::Log>(
+            "log2",
+            &protos::Log {
+                message: Some("hello".to_string()),
+            },
+            QueueName::from("default"),
+        )
+        .await?;
+
+    let job_id = producer
+        .schedule::<protos::Log>(
+            "log-no-handler",
             &protos::Log {
                 message: Some("hello".to_string()),
             },

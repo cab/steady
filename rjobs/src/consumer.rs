@@ -1,6 +1,6 @@
 use crate::{
     backends,
-    error::{Result, StdError},
+    error::{ErrorHandlers, Result, StdError},
     jobs::{self, JobDefinition, JobHandler, JobId},
     Error, QueueName,
 };
@@ -138,6 +138,7 @@ pub struct Consumer<Backend> {
     backend: Backend,
     poller: Poller<Backend>,
     manager: Manager<Backend>,
+    error_handlers: ErrorHandlers,
 }
 
 impl<Backend> std::fmt::Debug for Consumer<Backend> {

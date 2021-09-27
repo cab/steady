@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rjobs::{JobHandler, MemoryBackend, QueueName, RedisBackend, Scheduler};
+use rjobs::{Consumer, JobHandler, MemoryBackend, QueueName, RedisBackend};
 use serde::{Deserialize, Serialize};
 use test_env_log::test as logtest;
 
@@ -22,22 +22,22 @@ impl JobHandler for Log {
 
 #[logtest(tokio::test)]
 async fn test_redis() -> Result<()> {
-    let mut scheduler = Scheduler::new(RedisBackend::new(REDIS_URL)?)?;
-    scheduler.start();
-    let job_id = scheduler
+    let mut consumer = Consumer::new(RedisBackend::new(REDIS_URL)?)?;
+    consumer.start();
+    let job_id = consumer
         .schedule::<Log>(&"test, redis".to_string(), QueueName::from("default"))
         .await?;
-    scheduler.drain(true).await?;
+    consumer.drain(true).await?;
     Ok(())
 }
 
 #[logtest(tokio::test)]
 async fn test_memory() -> Result<()> {
-    let mut scheduler = Scheduler::new(MemoryBackend::default())?;
-    scheduler.start();
-    let job_id = scheduler
+    let mut consumer = Consumer::new(MemoryBackend::default())?;
+    consumer.start();
+    let job_id = consumer
         .schedule::<Log>(&"test, memory".to_string(), QueueName::from("default"))
         .await?;
-    scheduler.drain(true).await?;
+    consumer.drain(true).await?;
     Ok(())
 }

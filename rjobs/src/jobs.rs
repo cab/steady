@@ -50,20 +50,21 @@ impl std::fmt::Debug for JobDefinition {
 }
 
 impl JobDefinition {
-    pub(crate) fn new<S>(
+    pub(crate) fn new<S, N>(
         job_data: &S,
-        job_name: String,
+        job_name: N,
         queue: QueueName,
         enqueued_at: DateTime<Utc>,
     ) -> Result<Self>
     where
         S: prost::Message,
+        N: Into<String>,
     {
         let id = JobId::random();
         let serialized_job_data = job_data.encode_to_vec();
         Ok(Self {
+            job_name: job_name.into(),
             serialized_job_data,
-            job_name,
             queue,
             id,
             enqueued_at,
