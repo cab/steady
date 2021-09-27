@@ -1,6 +1,9 @@
 use anyhow::Result;
-use rjobs::{Consumer, CronScheduler, JobHandler, Producer, QueueName, RedisBackend};
+use rjobs::{
+    Consumer, CronScheduler, ErrorHandler, JobHandler, JobId, Producer, QueueName, RedisBackend,
+};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[derive(Default)]
 struct Log {}
@@ -35,6 +38,14 @@ impl JobHandler for Log2 {
     }
 }
 
+struct JobErrorHandler;
+
+impl ErrorHandler for JobErrorHandler {
+    fn job_failed(&self, job_id: &JobId, job_name: &str, error: &rjobs::Error) {
+        warn!("JOB FAILEDDDDDD");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -45,6 +56,7 @@ async fn main() -> Result<()> {
     const REDIS_URL: &'static str = "redis://127.0.0.1";
     let backend = RedisBackend::new(REDIS_URL)?;
     let mut consumer = Consumer::new(backend.clone())?;
+    consumer.add_error_handler(JobErrorHandler);
     consumer.register_handler::<Log>()?;
     consumer.register_handler::<Log2>()?;
     consumer.start();

@@ -1,11 +1,11 @@
 use crate::{
     backends,
-    error::{ErrorHandlers, Result, StdError},
+    error::{ErrorHandler, ErrorHandlers, Result, StdError},
     jobs::{self, JobDefinition, JobHandler, JobId},
     Error, QueueName,
 };
 use chrono::Duration;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{any::Any, collections::HashMap, sync::Arc};
 use std::{collections::VecDeque, num::NonZeroUsize};
@@ -21,6 +21,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 
 struct Queue<Backend> {
     handlers: Handlers,
+    error_handlers: ErrorHandlers,
     name: QueueName,
     manager_tx: UnboundedSender<ManagerAction>,
     pulled_jobs: VecDeque<jobs::JobDefinition>,
@@ -45,11 +46,13 @@ where
         name: QueueName,
         backend: Backend,
         handlers: Handlers,
+        error_handlers: ErrorHandlers,
         manager_tx: UnboundedSender<ManagerAction>,
     ) -> Self {
         Self {
             pulled_jobs: VecDeque::new(),
             manager_tx,
+            error_handlers,
             name,
             backend,
             handlers,
@@ -81,6 +84,13 @@ where
                         None => Err(Error::NoHandler(next_job)),
                     }
                 }
+                .inspect_err({
+                    let job = job.clone();
+                    let error_handlers = self.error_handlers.clone();
+                    move |e| {
+                        error_handlers.job_failed(&job.id, &job.job_name, e);
+                    }
+                })
                 .instrument(tracing::info_span!("run_pulled_job", job = ?job))
             })
             .collect::<Vec<_>>()
@@ -155,13 +165,28 @@ where
     Backend: backends::Backend + 'static,
 {
     pub fn new(backend: Backend) -> Result<Self> {
-        let manager = Manager::new(backend.clone(), Duration::seconds(1));
-        let poller = Poller::new(backend.clone(), Duration::seconds(1), manager.action_tx());
+        let error_handlers = ErrorHandlers::default();
+        let manager = Manager::new(
+            backend.clone(),
+            Duration::seconds(1),
+            error_handlers.clone(),
+        );
+        let poller = Poller::new(
+            backend.clone(),
+            Duration::seconds(1),
+            manager.action_tx(),
+            error_handlers.clone(),
+        );
         Ok(Self {
+            error_handlers,
             backend,
             poller,
             manager,
         })
+    }
+
+    pub fn add_error_handler(&mut self, handler: impl ErrorHandler + 'static) {
+        self.error_handlers.add(handler);
     }
 
     pub fn register_handler<S>(&mut self) -> Result<()>
@@ -202,6 +227,7 @@ struct Manager<Backend> {
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
     inner: Option<Arc<ManagerInner<Backend>>>,
     handlers: Handlers,
+    error_handlers: ErrorHandlers,
 }
 
 impl<Backend> std::fmt::Debug for Manager<Backend> {
@@ -273,6 +299,7 @@ impl Handlers {
 #[derive(Debug)]
 struct ManagerInner<Backend> {
     queues_by_name: HashMap<QueueName, Mutex<Queue<Backend>>>,
+    error_handlers: ErrorHandlers,
 }
 
 #[derive(Debug)]
@@ -285,15 +312,16 @@ impl<Backend> Manager<Backend>
 where
     Backend: backends::Backend + 'static,
 {
-    fn new(backend: Backend, rate: Duration) -> Self {
+    fn new(backend: Backend, rate: Duration, error_handlers: ErrorHandlers) -> Self {
         let handle_comms = unbounded_channel();
         Self {
             timer_handle: None,
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
+            handlers: Handlers::default(),
             inner: None,
             rate,
+            error_handlers,
             backend,
-            handlers: Handlers::default(),
         }
     }
 
@@ -341,13 +369,17 @@ where
             QueueName::from("default"),
             self.backend.clone(),
             self.handlers.clone(),
+            self.error_handlers.clone(),
             self.action_tx(),
         )]
         .into_iter()
         .map(|queue| (queue.name.clone(), Mutex::new(queue)))
         .collect();
 
-        self.inner = Some(Arc::new(ManagerInner { queues_by_name }));
+        self.inner = Some(Arc::new(ManagerInner {
+            queues_by_name,
+            error_handlers: self.error_handlers.clone(),
+        }));
 
         self.timer_handle = Some(tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
@@ -385,7 +417,7 @@ where
                         // todo handle error
                         let mut queue = queue.lock().await;
                         if let Err(e) = queue.process().await {
-                            warn!("{} failed to process: {}", queue.name, e);
+                            error!("queue [{}] failed to process: {}", queue.name, e);
                         }
                     }
                 }
@@ -402,6 +434,7 @@ struct Poller<Backend> {
     manager_tx: UnboundedSender<ManagerAction>,
     handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
     timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+    error_handlers: ErrorHandlers,
 }
 
 impl<Backend> std::fmt::Debug for Poller<Backend> {
@@ -429,11 +462,17 @@ impl<Backend> Poller<Backend>
 where
     Backend: backends::Backend + 'static,
 {
-    fn new(backend: Backend, rate: Duration, manager_tx: UnboundedSender<ManagerAction>) -> Self {
+    fn new(
+        backend: Backend,
+        rate: Duration,
+        manager_tx: UnboundedSender<ManagerAction>,
+        error_handlers: ErrorHandlers,
+    ) -> Self {
         let handle_comms = unbounded_channel();
         Self {
             handle_comms: (handle_comms.0, Some(handle_comms.1)),
             timer_handle: None,
+            error_handlers,
             backend,
             manager_tx,
             rate,
