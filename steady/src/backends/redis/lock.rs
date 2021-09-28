@@ -334,18 +334,19 @@ async fn extend(
     }
 }
 
-pub async fn with_lock<F, R>(
+pub async fn with_lock<F, Fut, R>(
     clients: impl IntoIterator<Item = redis::Client>,
     resource_key: &str,
     ttl: Duration,
     f: F,
 ) -> Result<R>
 where
-    F: Fn() -> R,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = R>,
 {
     let redlock = Redlock::new(clients)?;
     let lock = redlock.lock(resource_key, ttl).await?;
-    let result = f();
+    let result = f().await;
     lock.unlock().await.map_err(|(_, err)| err)?;
     Ok(result)
 }

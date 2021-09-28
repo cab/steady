@@ -1,25 +1,15 @@
 use crate::{
     backends,
     error::Result,
-    jobs::{self, QueueName},
+    jobs::{self, JobDefinition, QueueName},
     JobHandler,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, instrument};
 
-#[derive(Debug)]
-pub enum ProducerAction {}
-
+#[derive(Clone)]
 pub struct Producer<Backend> {
     backend: Backend,
-    action_tx: UnboundedSender<ProducerAction>,
-    action_rx: UnboundedReceiver<ProducerAction>,
-}
-
-impl<Backend> Producer<Backend> {
-    pub(crate) fn action_tx(&self) -> UnboundedSender<ProducerAction> {
-        self.action_tx.clone()
-    }
 }
 
 impl<Backend> Producer<Backend>
@@ -27,12 +17,7 @@ where
     Backend: backends::Backend + 'static,
 {
     pub fn new(backend: Backend) -> Self {
-        let (action_tx, action_rx) = unbounded_channel();
-        Self {
-            backend,
-            action_rx,
-            action_tx,
-        }
+        Self { backend }
     }
 
     #[instrument(skip(self))]
@@ -47,7 +32,12 @@ where
     {
         let job_def =
             jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
-        debug!("scheduling {:?}", job_def);
+        self.enqueue_job(job_def).await
+    }
+
+    #[instrument(skip(self))]
+    pub(crate) async fn enqueue_job(&self, job_def: JobDefinition) -> Result<jobs::JobId> {
+        debug!("enqueuing {:?}", job_def);
         self.backend.enqueue(&job_def).await?;
         Ok(job_def.id)
     }

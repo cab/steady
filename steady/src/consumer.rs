@@ -360,6 +360,7 @@ where
         Ok(())
     }
 
+    // todo match what cron does (await the spawn)
     #[instrument]
     fn start(&mut self) {
         if self.timer_handle.is_some() {

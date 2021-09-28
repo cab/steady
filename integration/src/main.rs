@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .pretty()
         // .json()
-        .with_max_level(tracing::Level::TRACE)
+        .with_max_level(tracing::Level::DEBUG)
         .init();
     const REDIS_URL: &'static str = "redis://127.0.0.1";
     let backend = RedisBackend::new(REDIS_URL)?;
@@ -62,7 +62,17 @@ async fn main() -> Result<()> {
     consumer.start();
 
     let producer = Producer::new(backend.clone());
-    let mut cron = CronScheduler::for_producer(&producer);
+    let mut cron = CronScheduler::new(producer.clone());
+
+    cron.schedule_for_handler::<Log>(
+        &protos::Log {
+            message: Some("hello from the future".into()),
+        },
+        QueueName::from("default"),
+        "0 * * * * *",
+    )
+    .await?;
+
     let job_id = producer
         .enqueue_for_handler::<Log>(
             &protos::Log {
@@ -93,6 +103,8 @@ async fn main() -> Result<()> {
 
     // consumer.drain(true).await?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+    // tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+
+    tokio::try_join!(cron.run()).unwrap();
     Ok(())
 }

@@ -21,6 +21,8 @@ pub enum Error {
     JobFailed(JobDefinition, #[source] StdError),
     #[error("job failures: {0:?}")]
     JobFailures(Vec<Error>),
+    #[error(transparent)]
+    Cron(#[from] cron::error::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
