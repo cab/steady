@@ -211,28 +211,16 @@ where
         };
         Ok(())
     }
-
-    #[instrument(skip(self))]
-    pub async fn drain(&mut self, from_backend: bool) -> Result<()> {
-        if let Err(e) = self.poller.stop().await {
-            error!("failed to stop poller: {}", e);
-        }
-        if let Err(e) = self.manager.drain(from_backend).await {
-            error!("failed to stop manager: {}", e);
-        }
-        Ok(())
-    }
 }
 
 struct Manager<Backend> {
     rate: Duration,
+    queues_by_name: Option<HashMap<QueueName, Mutex<Queue<Backend>>>>,
     handle_comms: (
         UnboundedSender<ManagerAction>,
-        Option<UnboundedReceiver<ManagerAction>>,
+        UnboundedReceiver<ManagerAction>,
     ),
     backend: Backend,
-    timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
-    inner: Option<Arc<ManagerInner<Backend>>>,
     handlers: Handlers,
     error_handlers: ErrorHandlers,
 }
@@ -304,12 +292,6 @@ impl Handlers {
 }
 
 #[derive(Debug)]
-struct ManagerInner<Backend> {
-    queues_by_name: HashMap<QueueName, Mutex<Queue<Backend>>>,
-    error_handlers: ErrorHandlers,
-}
-
-#[derive(Debug)]
 pub(crate) enum ManagerAction {
     Stop,
     PushJobs(Vec<JobDefinition>),
@@ -322,10 +304,9 @@ where
     fn new(backend: Backend, rate: Duration, error_handlers: ErrorHandlers) -> Self {
         let handle_comms = unbounded_channel();
         Self {
-            timer_handle: None,
-            handle_comms: (handle_comms.0, Some(handle_comms.1)),
+            handle_comms: (handle_comms.0, handle_comms.1),
             handlers: Handlers::default(),
-            inner: None,
+            queues_by_name: None,
             rate,
             error_handlers,
             backend,
@@ -345,27 +326,6 @@ where
     }
 
     #[instrument]
-    async fn drain(&mut self, from_backend: bool) -> Result<()> {
-        trace!("sending message to drain manager");
-        self.handle_comms.0.send(ManagerAction::Stop).unwrap(); // todo handle error
-
-        for queue in self.inner.as_ref().unwrap().queues_by_name.values() {
-            // todo handle error
-            let mut queue = queue.lock().await;
-            if let Err(e) = queue.drain(from_backend).await {
-                warn!("failed to drain `{}`: {}", queue.name, e);
-            }
-        }
-        if let Some(handle) = self.timer_handle.take() {
-            let output = handle.await.unwrap(); // TODO handle error
-            if let Err(e) = output {
-                warn!("manager errored: {}", e); // todo
-            }
-        }
-        Ok(())
-    }
-
-    #[instrument]
     async fn run(mut self) -> Result<()> {
         let queues_by_name = vec![Queue::new(
             QueueName::from("default"),
@@ -376,15 +336,10 @@ where
         )]
         .into_iter()
         .map(|queue| (queue.name.clone(), Mutex::new(queue)))
-        .collect();
-
-        let inner = Arc::new(ManagerInner {
-            queues_by_name,
-            error_handlers: self.error_handlers.clone(),
-        });
+        .collect::<HashMap<_, _>>();
 
         tokio::spawn({
-            let mut rx = self.handle_comms.1.take().unwrap();
+            let mut rx = self.handle_comms.1;
             let rate = self.rate;
 
             async move {
@@ -402,7 +357,7 @@ where
                                     .into_iter()
                                     .map(|job| (job.queue.clone(), vec![job]));
                                 for (queue, jobs) in jobs_by_queue {
-                                    if let Some(queue) = inner.queues_by_name.get(&queue) {
+                                    if let Some(queue) = queues_by_name.get(&queue) {
                                         // todo handle error
                                         queue.lock().await.append_jobs(jobs);
                                     }
@@ -412,7 +367,7 @@ where
                     }
                     interval.tick().await;
 
-                    for queue in inner.queues_by_name.values() {
+                    for queue in queues_by_name.values() {
                         // todo handle error
                         let mut queue = queue.lock().await;
                         if let Err(e) = queue.process().await {
