@@ -20,24 +20,24 @@ impl JobHandler for Log {
     }
 }
 
-#[logtest(tokio::test)]
-async fn test_redis() -> Result<()> {
-    let mut consumer = Consumer::new(RedisBackend::new(REDIS_URL)?)?;
-    consumer.start();
-    let job_id = consumer
-        .schedule::<Log>(&"test, redis".to_string(), QueueName::from("default"))
-        .await?;
-    consumer.drain(true).await?;
-    Ok(())
-}
+// #[logtest(tokio::test)]
+// async fn test_redis() -> Result<()> {
+//     let mut consumer = Consumer::new(RedisBackend::new(REDIS_URL)?)?;
+//     consumer.start();
+//     let job_id = consumer
+//         .schedule::<Log>(&"test, redis".to_string(), QueueName::from("default"))
+//         .await?;
+//     consumer.drain(true).await?;
+//     Ok(())
+// }
 
-#[logtest(tokio::test)]
-async fn test_memory() -> Result<()> {
-    let mut consumer = Consumer::new(MemoryBackend::default())?;
-    consumer.start();
-    let job_id = consumer
-        .schedule::<Log>(&"test, memory".to_string(), QueueName::from("default"))
-        .await?;
-    consumer.drain(true).await?;
-    Ok(())
-}
+// #[logtest(tokio::test)]
+// async fn test_memory() -> Result<()> {
+//     let mut consumer = Consumer::new(MemoryBackend::default())?;
+//     consumer.start();
+//     let job_id = consumer
+//         .schedule::<Log>(&"test, memory".to_string(), QueueName::from("default"))
+//         .await?;
+//     consumer.drain(true).await?;
+//     Ok(())
+// }
