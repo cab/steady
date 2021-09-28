@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
     consumer.add_error_handler(JobErrorHandler);
     consumer.register_handler::<Log>()?;
     consumer.register_handler::<Log2>()?;
-    consumer.start();
 
     let producer = Producer::new(backend.clone());
     let mut cron = CronScheduler::new(producer.clone());
@@ -101,10 +100,6 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    // consumer.drain(true).await?;
-
-    // tokio::time::sleep(std::time::Duration::from_secs(100)).await;
-
-    tokio::try_join!(cron.run()).unwrap();
+    tokio::try_join!(cron.run(), consumer.run()).unwrap();
     Ok(())
 }

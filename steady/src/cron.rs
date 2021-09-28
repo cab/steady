@@ -110,6 +110,7 @@ where
                                 error!("failed to enqueue job: {}", e);
                             }
                             job.update_next();
+                            debug!("scheduling {:?} again at {}", job.job, job.next);
                         }
                     }
                 }

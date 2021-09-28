@@ -202,9 +202,14 @@ where
         self.manager.action_tx()
     }
 
-    pub fn start(&mut self) {
-        self.manager.start();
-        self.poller.start();
+    pub async fn run(mut self) -> Result<()> {
+        let manager = self.manager;
+        let poller = self.poller;
+        tokio::select! {
+            manager = manager.run() => {},
+            poller = poller.run() => {}
+        };
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -360,14 +365,8 @@ where
         Ok(())
     }
 
-    // todo match what cron does (await the spawn)
     #[instrument]
-    fn start(&mut self) {
-        if self.timer_handle.is_some() {
-            warn!("already started");
-            return;
-        }
-
+    async fn run(mut self) -> Result<()> {
         let queues_by_name = vec![Queue::new(
             QueueName::from("default"),
             self.backend.clone(),
@@ -379,18 +378,15 @@ where
         .map(|queue| (queue.name.clone(), Mutex::new(queue)))
         .collect();
 
-        self.inner = Some(Arc::new(ManagerInner {
+        let inner = Arc::new(ManagerInner {
             queues_by_name,
             error_handlers: self.error_handlers.clone(),
-        }));
+        });
 
-        self.timer_handle = Some(tokio::spawn({
+        tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
             let rate = self.rate;
-            let inner = match &self.inner {
-                Some(v) => v.clone(),
-                _ => todo!(),
-            };
+
             async move {
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {
@@ -427,7 +423,10 @@ where
                 Result::Ok(())
             }
             .instrument(tracing::info_span!("manager_loop_task"))
-        }));
+        })
+        .await
+        .map_err::<Error, _>(|e| todo!())??;
+        Ok(())
     }
 }
 
@@ -497,12 +496,8 @@ where
     }
 
     #[instrument]
-    fn start(&mut self) {
-        if self.timer_handle.is_some() {
-            warn!("already started");
-            return;
-        }
-        self.timer_handle = Some(tokio::spawn({
+    async fn run(mut self) -> Result<()> {
+        tokio::spawn({
             let mut rx = self.handle_comms.1.take().unwrap();
             let manager_tx = self.manager_tx.clone();
             let rate = self.rate;
@@ -533,6 +528,9 @@ where
                 Result::Ok(())
             }
             .instrument(tracing::info_span!("poller_loop_task"))
-        }));
+        })
+        .await
+        .map_err::<Error, _>(|e| todo!())??;
+        Ok(())
     }
 }
