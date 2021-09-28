@@ -1,4 +1,5 @@
 pub(crate) mod memory;
+#[cfg(feature = "backend-redis")]
 pub(crate) mod redis;
 
 use crate::{jobs::JobDefinition, QueueName, Result};

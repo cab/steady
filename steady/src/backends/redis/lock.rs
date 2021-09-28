@@ -73,12 +73,14 @@ pub struct Redlock {
 }
 
 impl Redlock {
-    fn new(clients: Vec<redis::Client>) -> Result<Self> {
+    fn new(clients: impl IntoIterator<Item = redis::Client>) -> Result<Self> {
+        let clients = clients.into_iter().collect::<Vec<_>>();
         if clients.is_empty() {
             return Err(Error::NoRedisClients);
         }
         let quorum = (clients.len() as f64 / 2_f64).floor() as usize + 1;
 
+        // TODO allow configuration
         let drift_factor = 0.01f32;
         let retry_jitter = 400;
         let retry_delay = Duration::from_millis(400);
@@ -332,16 +334,32 @@ async fn extend(
     }
 }
 
+pub async fn with_lock<F, R>(
+    clients: impl IntoIterator<Item = redis::Client>,
+    resource_key: &str,
+    ttl: Duration,
+    f: F,
+) -> Result<R>
+where
+    F: Fn() -> R,
+{
+    let redlock = Redlock::new(clients)?;
+    let lock = redlock.lock(resource_key, ttl).await?;
+    let result = f();
+    lock.unlock().await.map_err(|(_, err)| err)?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::thread;
 
     use super::*;
     use redis::Commands;
 
     lazy_static! {
-        static ref REDLOCK: Redlock =
-            Redlock::new(vec![redis::Client::open("redis://127.0.0.1").unwrap()]).unwrap();
+        static ref CLIENTS: Vec<redis::Client> =
+            vec![redis::Client::open("redis://127.0.0.1").unwrap()];
+        static ref REDLOCK: Redlock = Redlock::new(CLIENTS.clone()).unwrap();
         static ref REDIS_CLI: redis::Client = redis::Client::open("redis://127.0.0.1").unwrap();
     }
 
@@ -352,6 +370,16 @@ mod tests {
 
         let lock = REDLOCK.lock(resource_name, one_second).await.unwrap();
         assert!(lock.expiration < SystemTime::now() + one_second);
+    }
+
+    #[tokio::test]
+    async fn test_with_lock() {
+        let resource_key = "test_with_lock";
+        let one_second = Duration::from_millis(1000);
+        let out = with_lock(CLIENTS.clone(), resource_key, one_second, || 1)
+            .await
+            .unwrap();
+        assert_eq!(out, 1);
     }
 
     #[tokio::test]

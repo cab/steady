@@ -5,6 +5,10 @@ license = "Apache-2.0"
 name = "steady"
 version = "0.1.0"
 
+[features]
+backend-redis = ["redis"]
+default = ["backend-redis"]
+
 [dependencies]
 async-trait = "^0.1"
 bincode = "^1.0"
@@ -14,7 +18,7 @@ lazy_static = "^1.0"
 nanoid = "^0.4"
 prost = "0.8"
 rand = "^0.8"
-redis = {version = "^0.21", features = ["tokio-comp"]}
+redis = {version = "^0.21", optional = true, features = ["tokio-comp"]}
 serde = {version = "^1.0", features = ["derive"]}
 thiserror = "^1.0"
 tokio = {version = "^1.0", features = ["time", "sync"]}
