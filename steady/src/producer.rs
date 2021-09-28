@@ -34,18 +34,18 @@ where
     {
         let job_def =
             jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
-        self.enqueue_job(job_def, perform_at).await
+        self.enqueue_job(&job_def, perform_at).await
     }
 
     #[instrument(skip(self))]
     pub(crate) async fn enqueue_job(
         &self,
-        job_def: JobDefinition,
+        job_def: &JobDefinition,
         perform_at: DateTime<Utc>,
     ) -> Result<jobs::JobId> {
-        debug!("enqueuing {:?}", job_def);
-        self.backend.enqueue(&job_def, perform_at).await?;
-        Ok(job_def.id)
+        debug!("enqueuing {:?} for {}", job_def, perform_at);
+        self.backend.enqueue(job_def, perform_at).await?;
+        Ok(job_def.id.clone())
     }
 
     #[instrument(skip(self))]

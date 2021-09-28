@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use std::marker::PhantomData;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, error, info, instrument, Instrument};
+use tracing::{debug, error, info, instrument, trace, warn, Instrument};
 
 use crate::{
     backends,
@@ -10,25 +10,40 @@ use crate::{
     Error, JobHandler, QueueName, Result,
 };
 
-#[derive(Debug)]
 struct ScheduledJobDefinition {
     job: JobDefinition,
     schedule: cron::Schedule,
-    next: DateTime<Utc>,
+    next_time: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ScheduledJobDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScheduledJobDefinition")
+            .field("job", &self.job)
+            .field("schedule", &self.schedule)
+            .finish()
+    }
 }
 
 impl ScheduledJobDefinition {
     fn new(job: JobDefinition, schedule: cron::Schedule) -> Self {
-        let next = schedule.upcoming(Utc).next().unwrap();
         Self {
+            next_time: None,
             job,
             schedule,
-            next,
         }
     }
 
-    fn update_next(&mut self) {
-        self.next = self.schedule.upcoming(Utc).next().unwrap();
+    fn set_next_time(&mut self, next: DateTime<Utc>) {
+        self.next_time = Some(next);
+    }
+
+    fn next(&self) -> DateTime<Utc> {
+        if let Some(last_run) = self.next_time.as_ref() {
+            self.schedule.after(last_run).next().unwrap()
+        } else {
+            self.schedule.upcoming(Utc).next().unwrap()
+        }
     }
 }
 
@@ -98,29 +113,42 @@ where
         let rate = std::time::Duration::from_secs(1);
         let mut jobs = self.scheduled_jobs;
         let producer = self.producer;
-        tokio::spawn(
-            async move {
-                let mut interval = tokio::time::interval(rate);
-                loop {
-                    interval.tick().await;
-                    // would probably be better to use zadd and let redis tell us when it's ready?
-                    // right now this will schedule the same job once per instance, which is wrong
-                    let now = Utc::now();
-                    for job in &mut jobs {
-                        if job.next <= now {
-                            // if let Err(e) = producer.enqueue_job(job.job.clone()).await {
-                            //     error!("failed to enqueue job: {}", e);
-                            // }
-                            // job.update_next();
-                            // debug!("scheduling {:?} again at {}", job.job, job.next);
+
+        for mut job in jobs {
+            let span = tracing::info_span!("scheduled_job", job = ?job);
+            let handle = tokio::spawn(
+                {
+                    let producer = producer.clone();
+                    async move {
+                        loop {
+                            let next = job.next();
+                            let now = Utc::now();
+                            if next <= now {
+                                if let Err(e) =
+                                    producer.enqueue_job(&job.job.with_new_id(), now).await
+                                {
+                                    // todo
+                                    error!("failed to enqueue: {}", e);
+                                }
+                            } else {
+                                if let Err(e) =
+                                    producer.enqueue_job(&job.job.with_new_id(), next).await
+                                {
+                                    // todo
+                                    error!("failed to enqueue: {}", e);
+                                }
+                                job.set_next_time(next);
+                                let delta = next - now;
+                                trace!("sleeping for {:?}", delta);
+                                tokio::time::sleep(delta.to_std().unwrap()).await;
+                            }
                         }
                     }
                 }
-            }
-            .instrument(tracing::info_span!("run_spawn")),
-        )
-        .await
-        .map_err::<Error, _>(|e| todo!())?;
+                .instrument(span),
+            );
+        }
+
         Ok(())
     }
 }

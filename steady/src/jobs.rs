@@ -70,6 +70,13 @@ impl JobDefinition {
             enqueued_at,
         })
     }
+
+    pub fn with_new_id(&self) -> Self {
+        Self {
+            id: JobId::random(),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
