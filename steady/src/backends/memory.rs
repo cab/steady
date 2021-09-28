@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::{jobs::JobDefinition, QueueName, Result};
 use std::{
@@ -31,7 +31,7 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn enqueue(&self, job_def: &JobDefinition) -> Result<()> {
+    async fn enqueue(&self, job_def: &JobDefinition, perform_at: DateTime<Utc>) -> Result<()> {
         self.jobs_by_queue
             .lock()
             .unwrap() // todo
@@ -40,5 +40,9 @@ impl super::Backend for Backend {
             .or_insert_with(VecDeque::new)
             .push_back(job_def.clone());
         Ok(())
+    }
+
+    async fn pull_scheduled(&self, count: NonZeroUsize) -> Result<Vec<JobDefinition>> {
+        todo!();
     }
 }

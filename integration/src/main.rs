@@ -63,14 +63,14 @@ async fn main() -> Result<()> {
     let producer = Producer::new(backend.clone());
     let mut cron = CronScheduler::new(producer.clone());
 
-    cron.schedule_for_handler::<Log>(
-        &protos::Log {
-            message: Some("hello from the future".into()),
-        },
-        QueueName::from("default"),
-        "0 * * * * *",
-    )
-    .await?;
+    // cron.schedule_for_handler::<Log>(
+    //     &protos::Log {
+    //         message: Some("hello from the future".into()),
+    //     },
+    //     QueueName::from("default"),
+    //     "0 * * * * *",
+    // )
+    // .await?;
 
     let job_id = producer
         .enqueue_for_handler::<Log>(
@@ -78,27 +78,48 @@ async fn main() -> Result<()> {
                 message: Some("hi".to_string()),
             },
             QueueName::from("default"),
-        )
-        .await?;
-    let job_id = producer
-        .enqueue::<protos::Log>(
-            "log2",
-            &protos::Log {
-                message: Some("hello".to_string()),
-            },
-            QueueName::from("default"),
+            steady::Utc::now() + steady::Duration::seconds(5),
         )
         .await?;
 
     let job_id = producer
-        .enqueue::<protos::Log>(
-            "log-no-handler",
+        .enqueue_for_handler::<Log>(
             &protos::Log {
-                message: Some("hello".to_string()),
+                message: Some("hi".to_string()),
             },
             QueueName::from("default"),
+            steady::Utc::now() + steady::Duration::seconds(5),
         )
         .await?;
+
+    let job_id = producer
+        .enqueue_for_handler::<Log>(
+            &protos::Log {
+                message: Some("hi".to_string()),
+            },
+            QueueName::from("default"),
+            steady::Utc::now() + steady::Duration::seconds(5),
+        )
+        .await?;
+    // let job_id = producer
+    //     .enqueue::<protos::Log>(
+    //         "log2",
+    //         &protos::Log {
+    //             message: Some("hello".to_string()),
+    //         },
+    //         QueueName::from("default"),
+    //     )
+    //     .await?;
+
+    // let job_id = producer
+    //     .enqueue::<protos::Log>(
+    //         "log-no-handler",
+    //         &protos::Log {
+    //             message: Some("hello".to_string()),
+    //         },
+    //         QueueName::from("default"),
+    //     )
+    //     .await?;
 
     tokio::try_join!(cron.run(), consumer.run()).unwrap();
     Ok(())

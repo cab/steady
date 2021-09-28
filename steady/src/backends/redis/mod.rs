@@ -1,10 +1,10 @@
 mod lock;
 
-use std::num::NonZeroUsize;
-
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use redis::{aio::ConnectionLike, AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
-use tracing::warn;
+use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
+use tracing::{debug, error, trace, warn};
 
 use crate::{jobs::JobDefinition, QueueName, Result};
 
@@ -61,11 +61,62 @@ impl super::Backend for Backend {
         Ok(job_defs)
     }
 
-    async fn enqueue(&self, job_def: &JobDefinition) -> Result<()> {
+    async fn pull_scheduled(&self, count: NonZeroUsize) -> Result<Vec<JobDefinition>> {
         let mut connection = self.redis_client.get_async_connection().await?;
-        let () = connection
-            .lpush(&job_def.queue, job_definition_to_redis_args(job_def)?)
+        let all_jobs = connection
+            // TODO remove "scheduled" as magic name
+            .zrangebyscore_limit::<_, _, _, Vec<JobDefinition>>(
+                "scheduled",
+                -1,
+                Utc::now().timestamp_nanos(),
+                0,
+                count.get() as isize,
+            )
             .await?;
+        trace!("found {} jobs in zrange", all_jobs.len());
+        let mut jobs = Vec::new();
+        for job in all_jobs {
+            match connection
+                .zrem::<_, _, i32>("scheduled", job_definition_to_redis_args(&job)?)
+                .await
+            {
+                Ok(1) => {
+                    // successful remove
+                    jobs.push(job);
+                }
+                Ok(_) => {
+                    // did not remove. another instance probably took it
+                    // TODO better message
+                    warn!("could not remove")
+                }
+                Err(e) => {
+                    error!("could not remove: {}", e);
+                }
+            }
+        }
+
+        Ok(jobs)
+    }
+
+    async fn enqueue(&self, job_def: &JobDefinition, perform_at: DateTime<Utc>) -> Result<()> {
+        let mut connection = self.redis_client.get_async_connection().await?;
+
+        if perform_at <= Utc::now() {
+            // perform_at is now / in the past, so we can push this straight to the relevant queue
+            let () = connection
+                .lpush(&job_def.queue, job_definition_to_redis_args(job_def)?)
+                .await?;
+        } else {
+            // put it in the `scheduled` queue
+            debug!("job executes in the future, placing in scheduled queue");
+            let () = connection
+                .zadd(
+                    "scheduled",
+                    job_definition_to_redis_args(job_def)?,
+                    perform_at.timestamp_nanos(),
+                )
+                .await?;
+        }
         Ok(())
     }
 }

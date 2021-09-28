@@ -14,3 +14,7 @@ pub use consumer::Consumer;
 pub use error::{Error, ErrorHandler, Result};
 pub use jobs::{JobHandler, JobId, QueueName};
 pub use producer::Producer;
+
+pub type DateTime<T> = chrono::DateTime<T>;
+pub type Utc = chrono::Utc;
+pub type Duration = chrono::Duration;

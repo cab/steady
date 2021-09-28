@@ -457,6 +457,8 @@ where
             let manager_tx = self.manager_tx.clone();
             let rate = self.rate;
             let inner = PollerInner::new(self.backend.clone());
+            let backend = self.backend;
+            let pull_count = NonZeroUsize::new(100).unwrap();
             async move {
                 let mut interval = time::interval(rate.to_std().unwrap());
                 loop {
@@ -468,7 +470,7 @@ where
 
                     interval.tick().await;
 
-                    match inner.poll().await {
+                    match backend.pull_scheduled(pull_count).await {
                         Ok(jobs) => {
                             if !jobs.is_empty() {
                                 manager_tx.send(ManagerAction::PushJobs(jobs)).unwrap();
@@ -476,7 +478,7 @@ where
                             }
                         }
                         Err(e) => {
-                            todo!("{}", e);
+                            error!("TODO {}", e);
                         }
                     }
                 }
@@ -485,7 +487,10 @@ where
             .instrument(tracing::info_span!("poller_loop_task"))
         })
         .await
-        .map_err::<Error, _>(|e| todo!())??;
+        .map_err::<Error, _>(|e| {
+            warn!("unhandled: {}", e);
+            todo!()
+        })??;
         Ok(())
     }
 }

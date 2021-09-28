@@ -4,6 +4,7 @@ use crate::{
     jobs::{self, JobDefinition, QueueName},
     JobHandler,
 };
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, instrument};
 
@@ -26,19 +27,24 @@ where
         job_name: &str,
         job_data: &A,
         queue: QueueName,
+        perform_at: DateTime<Utc>,
     ) -> Result<jobs::JobId>
     where
         A: prost::Message,
     {
         let job_def =
             jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
-        self.enqueue_job(job_def).await
+        self.enqueue_job(job_def, perform_at).await
     }
 
     #[instrument(skip(self))]
-    pub(crate) async fn enqueue_job(&self, job_def: JobDefinition) -> Result<jobs::JobId> {
+    pub(crate) async fn enqueue_job(
+        &self,
+        job_def: JobDefinition,
+        perform_at: DateTime<Utc>,
+    ) -> Result<jobs::JobId> {
         debug!("enqueuing {:?}", job_def);
-        self.backend.enqueue(&job_def).await?;
+        self.backend.enqueue(&job_def, perform_at).await?;
         Ok(job_def.id)
     }
 
@@ -47,10 +53,12 @@ where
         &self,
         job_data: &T::Arg,
         queue: QueueName,
+        perform_at: DateTime<Utc>,
     ) -> Result<jobs::JobId>
     where
         T: JobHandler,
     {
-        self.enqueue::<T::Arg>(T::NAME, job_data, queue).await
+        self.enqueue::<T::Arg>(T::NAME, job_data, queue, perform_at)
+            .await
     }
 }

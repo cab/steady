@@ -14,31 +14,26 @@ use crate::{
 struct ScheduledJobDefinition {
     job: JobDefinition,
     schedule: cron::Schedule,
-    next: Option<DateTime<Utc>>,
+    next: DateTime<Utc>,
 }
 
 impl ScheduledJobDefinition {
     fn new(job: JobDefinition, schedule: cron::Schedule) -> Self {
+        let next = schedule.upcoming(Utc).next().unwrap();
         Self {
-            next: None,
             job,
             schedule,
+            next,
         }
     }
 
-    fn is_scheduled(&self) -> bool {
-        self.next.is_some()
-    }
-
-    fn update_next(&mut self) -> DateTime<Utc> {
-        let next = self.schedule.upcoming(Utc).next().unwrap();
-        self.next = Some(next);
-        next
+    fn update_next(&mut self) {
+        self.next = self.schedule.upcoming(Utc).next().unwrap();
     }
 }
 
 pub struct CronScheduler<Backend> {
-    backend: Backend,
+    producer: Producer<Backend>,
     scheduled_jobs: Vec<ScheduledJobDefinition>,
 }
 
@@ -52,12 +47,12 @@ impl<Backend> std::fmt::Debug for CronScheduler<Backend> {
 
 impl<Backend> CronScheduler<Backend>
 where
-    Backend: backends::CronBackend + 'static,
+    Backend: backends::Backend + 'static,
 {
-    pub fn new(backend: Backend) -> Self {
+    pub fn new(producer: Producer<Backend>) -> Self {
         Self {
             scheduled_jobs: Vec::new(),
-            backend,
+            producer,
         }
     }
 
@@ -102,21 +97,22 @@ where
     pub async fn run(self) -> Result<()> {
         let rate = std::time::Duration::from_secs(1);
         let mut jobs = self.scheduled_jobs;
-        let backend = self.backend;
+        let producer = self.producer;
         tokio::spawn(
             async move {
                 let mut interval = tokio::time::interval(rate);
                 loop {
                     interval.tick().await;
-                    // would probably be better to use zadd and let redis tell us when it's ready
+                    // would probably be better to use zadd and let redis tell us when it's ready?
                     // right now this will schedule the same job once per instance, which is wrong
                     let now = Utc::now();
                     for job in &mut jobs {
-                        if !job.is_scheduled() {
-                            let next = job.update_next();
-                            if let Err(e) = backend.schedule(&job.job, next).await {
-                                error!("failed to schedule job: {}", e);
-                            }
+                        if job.next <= now {
+                            // if let Err(e) = producer.enqueue_job(job.job.clone()).await {
+                            //     error!("failed to enqueue job: {}", e);
+                            // }
+                            // job.update_next();
+                            // debug!("scheduling {:?} again at {}", job.job, job.next);
                         }
                     }
                 }
