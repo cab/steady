@@ -377,9 +377,14 @@ mod tests {
     async fn test_with_lock() {
         let resource_key = "test_with_lock";
         let one_second = Duration::from_millis(1000);
-        let out = with_lock(CLIENTS.clone(), resource_key, one_second, || 1)
-            .await
-            .unwrap();
+        let out = with_lock(
+            CLIENTS.clone(),
+            resource_key,
+            one_second,
+            || async move { 1 },
+        )
+        .await
+        .unwrap();
         assert_eq!(out, 1);
     }
 
