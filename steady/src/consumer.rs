@@ -170,7 +170,7 @@ where
         let error_handlers = ErrorHandlers::default();
         let manager = Manager::new(
             backend.clone(),
-            Duration::seconds(1),
+            Duration::milliseconds(250),
             error_handlers.clone(),
         );
         let poller = Poller::new(
@@ -335,8 +335,24 @@ where
             self.action_tx(),
         )]
         .into_iter()
-        .map(|queue| (queue.name.clone(), Mutex::new(queue)))
+        .map(|queue| (queue.name.clone(), Arc::new(Mutex::new(queue))))
         .collect::<HashMap<_, _>>();
+
+        for (_, queue) in &queues_by_name {
+            let mut interval = time::interval(self.rate.to_std().unwrap());
+            let handle = tokio::spawn({
+                let queue = queue.clone();
+                async move {
+                    loop {
+                        interval.tick().await;
+                        let mut queue = queue.lock().await;
+                        if let Err(e) = queue.process().await {
+                            error!("queue [{}] failed to process: {}", queue.name, e);
+                        }
+                    }
+                }
+            });
+        }
 
         tokio::spawn({
             let mut rx = self.handle_comms.1;
@@ -366,14 +382,6 @@ where
                         }
                     }
                     interval.tick().await;
-
-                    for queue in queues_by_name.values() {
-                        // todo handle error
-                        let mut queue = queue.lock().await;
-                        if let Err(e) = queue.process().await {
-                            error!("queue [{}] failed to process: {}", queue.name, e);
-                        }
-                    }
                 }
                 Result::Ok(())
             }
@@ -389,29 +397,13 @@ struct Poller<Backend> {
     rate: Duration,
     backend: Backend,
     manager_tx: UnboundedSender<ManagerAction>,
-    handle_comms: (UnboundedSender<()>, Option<UnboundedReceiver<()>>),
-    timer_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+    handle_comms: (UnboundedSender<()>, UnboundedReceiver<()>),
     error_handlers: ErrorHandlers,
 }
 
 impl<Backend> std::fmt::Debug for Poller<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Poller").field("rate", &self.rate).finish()
-    }
-}
-
-// todo better name
-struct PollerInner<Backend> {
-    backend: Backend,
-}
-
-impl<Backend> PollerInner<Backend> {
-    fn new(backend: Backend) -> Self {
-        Self { backend }
-    }
-
-    async fn poll(&self) -> Result<Vec<JobDefinition>> {
-        Ok(vec![])
     }
 }
 
@@ -427,8 +419,7 @@ where
     ) -> Self {
         let handle_comms = unbounded_channel();
         Self {
-            handle_comms: (handle_comms.0, Some(handle_comms.1)),
-            timer_handle: None,
+            handle_comms,
             error_handlers,
             backend,
             manager_tx,
@@ -437,26 +428,11 @@ where
     }
 
     #[instrument]
-    async fn stop(&mut self) -> Result<()> {
-        trace!("sending message to stop poller");
-        self.handle_comms.0.send(()).unwrap(); // todo handle error
-        if let Some(handle) = self.timer_handle.take() {
-            let output = handle.await.unwrap(); // TODO handle error
-            if let Err(e) = output {
-                // todo
-                warn!("poller errored: {}", e);
-            }
-        }
-        Ok(())
-    }
-
-    #[instrument]
-    async fn run(mut self) -> Result<()> {
+    async fn run(self) -> Result<()> {
         tokio::spawn({
-            let mut rx = self.handle_comms.1.take().unwrap();
+            let mut rx = self.handle_comms.1;
             let manager_tx = self.manager_tx.clone();
             let rate = self.rate;
-            let inner = PollerInner::new(self.backend.clone());
             let backend = self.backend;
             let pull_count = NonZeroUsize::new(100).unwrap();
             async move {

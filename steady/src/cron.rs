@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::marker::PhantomData;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, instrument, trace, warn, Instrument};
@@ -138,7 +138,7 @@ where
                                     error!("failed to enqueue: {}", e);
                                 }
                                 job.set_next_time(next);
-                                let delta = next - now;
+                                let delta = wait_time(now, next);
                                 trace!("sleeping for {:?}", delta);
                                 tokio::time::sleep(delta.to_std().unwrap()).await;
                             }
@@ -151,4 +151,12 @@ where
 
         Ok(())
     }
+}
+
+fn wait_time(now: DateTime<Utc>, next: DateTime<Utc>) -> Duration {
+    let mut delta = next - now;
+    if delta > Duration::seconds(10) {
+        delta = delta - Duration::seconds(5);
+    }
+    delta
 }

@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
             message: Some("hello from the future".into()),
         },
         QueueName::from("default"),
-        "0 * * * * *",
+        "*/10 * * * * *",
     )
     .await?;
 

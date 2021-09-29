@@ -68,7 +68,7 @@ impl super::Backend for Backend {
             .zrangebyscore_limit::<_, _, _, Vec<JobDefinition>>(
                 "scheduled",
                 -1,
-                Utc::now().timestamp_nanos(),
+                Utc::now().timestamp_millis(),
                 0,
                 count.get() as isize,
             )
@@ -113,7 +113,7 @@ impl super::Backend for Backend {
                 .zadd(
                     "scheduled",
                     job_definition_to_redis_args(job_def)?,
-                    perform_at.timestamp_nanos(),
+                    perform_at.timestamp_millis(),
                 )
                 .await?;
         }
