@@ -215,7 +215,6 @@ where
 
 struct Manager<Backend> {
     rate: Duration,
-    queues_by_name: Option<HashMap<QueueName, Mutex<Queue<Backend>>>>,
     handle_comms: (
         UnboundedSender<ManagerAction>,
         UnboundedReceiver<ManagerAction>,
@@ -306,7 +305,6 @@ where
         Self {
             handle_comms: (handle_comms.0, handle_comms.1),
             handlers: Handlers::default(),
-            queues_by_name: None,
             rate,
             error_handlers,
             backend,
@@ -327,6 +325,7 @@ where
 
     #[instrument]
     async fn run(mut self) -> Result<()> {
+        // TODO configure which queues are processed
         let queues_by_name = vec![Queue::new(
             QueueName::from("default"),
             self.backend.clone(),
