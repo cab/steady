@@ -33,6 +33,7 @@ impl JobId {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobDefinition {
     pub(crate) id: JobId,
+    pub(crate) idempotency_key: Option<String>,
     pub(crate) serialized_job_data: Vec<u8>,
     pub(crate) job_name: String,
     enqueued_at: DateTime<Utc>,
@@ -42,8 +43,10 @@ pub struct JobDefinition {
 impl std::fmt::Debug for JobDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobDefinition")
+            .field("idempotency_key", &self.idempotency_key)
             .field("id", &self.id)
             .field("job_name", &self.job_name)
+            .field("queue", &self.queue)
             .field("enqueued_at", &self.enqueued_at)
             .finish()
     }
@@ -51,29 +54,38 @@ impl std::fmt::Debug for JobDefinition {
 
 impl JobDefinition {
     pub(crate) fn new<S, N>(
+        idempotency_key: Option<String>,
         job_data: &S,
         job_name: N,
         queue: QueueName,
         enqueued_at: DateTime<Utc>,
-    ) -> Result<Self>
+    ) -> Self
     where
         S: prost::Message,
         N: Into<String>,
     {
         let id = JobId::random();
         let serialized_job_data = job_data.encode_to_vec();
-        Ok(Self {
+        Self {
             job_name: job_name.into(),
+            idempotency_key,
             serialized_job_data,
             queue,
             id,
             enqueued_at,
-        })
+        }
     }
 
     pub fn with_new_id(&self) -> Self {
         Self {
             id: JobId::random(),
+            ..self.clone()
+        }
+    }
+
+    pub fn with_new_idempotency_key<I>(&self, idempotency_key: Option<String>) -> Self {
+        Self {
+            idempotency_key,
             ..self.clone()
         }
     }

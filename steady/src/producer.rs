@@ -33,7 +33,7 @@ where
         A: prost::Message,
     {
         let job_def =
-            jobs::JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
+            jobs::JobDefinition::new::<A, _>(None, job_data, job_name, queue, chrono::Utc::now());
         self.enqueue_job(&job_def, perform_at).await
     }
 

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use steady::{
     Consumer, CronScheduler, ErrorHandler, JobHandler, JobId, Producer, QueueName, RedisBackend,
 };
 use tracing::warn;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Default)]
 struct Log {}
@@ -33,7 +33,7 @@ impl JobHandler for Log2 {
     type Arg = protos::Log;
     type Error = anyhow::Error;
 
-    async fn perform(&mut self, arg: Self::Arg) -> Result<(), Self::Error> {
+    async fn perform(&mut self, _arg: Self::Arg) -> Result<(), Self::Error> {
         Err(anyhow::anyhow!("test failure"))
     }
 }
@@ -48,12 +48,12 @@ impl ErrorHandler for JobErrorHandler {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    const REDIS_URL: &str = "redis://127.0.0.1";
     tracing_subscriber::fmt()
         .pretty()
+        .with_env_filter(EnvFilter::from_default_env())
         // .json()
-        .with_max_level(tracing::Level::DEBUG)
         .init();
-    const REDIS_URL: &'static str = "redis://127.0.0.1";
     let backend = RedisBackend::new(REDIS_URL)?;
     let mut consumer = Consumer::new(backend.clone())?;
     consumer.add_error_handler(JobErrorHandler);
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let job_id = producer
+    let _job_id = producer
         .enqueue_for_handler::<Log>(
             &protos::Log {
                 message: Some("hi".to_string()),

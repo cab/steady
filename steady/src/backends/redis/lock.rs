@@ -8,6 +8,7 @@ use lazy_static::lazy_static;
 use nanoid::nanoid;
 use rand::{thread_rng, Rng};
 use redis::ToRedisArgs;
+use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -18,11 +19,11 @@ pub enum Error {
     #[error(transparent)]
     Redis(#[from] redis::RedisError),
     #[error("unable to lock")]
-    UnableToLock(#[source] Box<dyn std::error::Error>),
+    UnableToLock(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("unable to unlock")]
     UnableToUnlock,
     #[error("unable to extend")]
-    UnableToExtend(#[source] Box<dyn std::error::Error>),
+    UnableToExtend(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("invalid ttl: {0}")]
     InvalidTtl(#[source] std::num::TryFromIntError),
     #[error("lock expired {0:?} ago")]
@@ -73,7 +74,7 @@ pub struct Redlock {
 }
 
 impl Redlock {
-    fn new(clients: impl IntoIterator<Item = redis::Client>) -> Result<Self> {
+    pub fn new(clients: impl IntoIterator<Item = redis::Client>) -> Result<Self> {
         let clients = clients.into_iter().collect::<Vec<_>>();
         if clients.is_empty() {
             return Err(Error::NoRedisClients);
@@ -96,22 +97,22 @@ impl Redlock {
         })
     }
 
-    pub async fn lock<'a>(&'a self, resource_name: &str, ttl: Duration) -> Result<Lock<'a>> {
+    pub async fn lock(&self, resource_name: &str, ttl: Duration) -> Result<Lock<'_>> {
         self.request(Request::Lock, resource_name, ttl).await
     }
 
-    async fn request<'a>(
-        &'a self,
+    async fn request(
+        &self,
         request: Request,
         resource_key: &str,
         ttl: Duration,
-    ) -> Result<Lock<'a>> {
+    ) -> Result<Lock<'_>> {
         let mut attempts = 0;
         let drift = Duration::from_millis(
             (self.drift_factor as f64 * ttl.as_millis() as f64).round() as u64 + 2,
         );
 
-        let mut last_error: Option<Box<dyn std::error::Error>> = None;
+        let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
 
         'retry: while attempts < self.retry_count {
             attempts += 1;
@@ -129,7 +130,7 @@ impl Redlock {
 
             for client in &self.clients {
                 let locked = Lock {
-                    redlock: &self,
+                    redlock: self,
                     resource_key: resource_key.into(),
                     value: value.clone(),
                     expiration: start + ttl - drift,
@@ -139,6 +140,8 @@ impl Redlock {
                     Request::Lock => lock(client, resource_key, &value, &ttl).await,
                     Request::Extend { .. } => extend(client, resource_key, &value, &ttl).await,
                 };
+
+                debug!("RESULT {:?}", result);
 
                 match result {
                     Ok(success) => {
@@ -162,6 +165,7 @@ impl Redlock {
                         continue 'retry;
                     }
                     Err(err) => {
+                        warn!("error: {}", err);
                         last_error = Some(Box::new(err));
                         errors += 1;
 
@@ -186,12 +190,12 @@ impl Redlock {
         })
     }
 
-    async fn extend<'a>(
-        &'a self,
+    async fn extend(
+        &self,
         resource_name: &str,
         value: impl Into<String>,
         ttl: Duration,
-    ) -> Result<Lock<'a>> {
+    ) -> Result<Lock<'_>> {
         self.request(
             Request::Extend {
                 resource_value: value.into(),
@@ -263,14 +267,14 @@ pub struct Lock<'a> {
 }
 
 impl<'a> Lock<'a> {
-    async fn unlock(self) -> std::result::Result<(), (Lock<'a>, Error)> {
+    pub async fn unlock(self) -> std::result::Result<(), (Lock<'a>, Error)> {
         self.redlock
             .unlock(&self.resource_key, &self.value)
             .await
             .map_err(|err| (self, err))
     }
 
-    async fn extend(&mut self, ttl: Duration) -> Result<()> {
+    pub async fn extend(&mut self, ttl: Duration) -> Result<()> {
         let now = SystemTime::now();
         if self.expiration < now {
             return Err(Error::LockExpired(now.duration_since(self.expiration).ok()));
@@ -292,6 +296,7 @@ async fn lock(
     value: &str,
     ttl: &Duration,
 ) -> Result<bool> {
+    debug!("locking {} for {:?}", resource_name, ttl);
     match SCRIPT_LOCK
         .key(String::from(resource_name))
         .arg(String::from(value))
@@ -305,6 +310,7 @@ async fn lock(
 }
 
 async fn unlock(client: &redis::Client, resource_name: &str, value: &str) -> Result<bool> {
+    debug!("unlocking {}", resource_name);
     match SCRIPT_UNLOCK
         .key(resource_name)
         .arg(value)

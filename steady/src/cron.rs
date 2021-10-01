@@ -82,7 +82,14 @@ where
     where
         A: prost::Message,
     {
-        let job_def = JobDefinition::new::<A, _>(job_data, job_name, queue, chrono::Utc::now())?;
+        let idempotency_key = format!("scheduled:{}:{}", job_name, cron_schedule);
+        let job_def = JobDefinition::new::<A, _>(
+            Some(idempotency_key),
+            job_data,
+            job_name,
+            queue,
+            chrono::Utc::now(),
+        );
         self.schedule_job(job_def, cron_schedule).await
     }
 

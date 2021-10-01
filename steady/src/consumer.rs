@@ -147,7 +147,6 @@ where
 }
 
 pub struct Consumer<Backend> {
-    backend: Backend,
     poller: Poller<Backend>,
     manager: Manager<Backend>,
     error_handlers: ErrorHandlers,
@@ -174,14 +173,13 @@ where
             error_handlers.clone(),
         );
         let poller = Poller::new(
-            backend.clone(),
+            backend,
             Duration::seconds(1),
             manager.action_tx(),
             error_handlers.clone(),
         );
         Ok(Self {
             error_handlers,
-            backend,
             poller,
             manager,
         })
@@ -292,7 +290,6 @@ impl Handlers {
 
 #[derive(Debug)]
 pub(crate) enum ManagerAction {
-    Stop,
     PushJobs(Vec<JobDefinition>),
 }
 
@@ -337,7 +334,7 @@ where
         .map(|queue| (queue.name.clone(), Arc::new(Mutex::new(queue))))
         .collect::<HashMap<_, _>>();
 
-        for (_, queue) in &queues_by_name {
+        for queue in queues_by_name.values() {
             let mut interval = time::interval(self.rate.to_std().unwrap());
             let handle = tokio::spawn({
                 let queue = queue.clone();
@@ -363,10 +360,6 @@ where
                     if let Ok(action) = rx.try_recv() {
                         debug!("manager received action: {:?}", action);
                         match action {
-                            ManagerAction::Stop => {
-                                info!("manager stopping");
-                                break;
-                            }
                             ManagerAction::PushJobs(all_jobs) => {
                                 let jobs_by_queue = all_jobs
                                     .into_iter()

@@ -3,7 +3,7 @@ mod lock;
 use chrono::{DateTime, Utc};
 use redis::{aio::ConnectionLike, AsyncCommands, FromRedisValue, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, time::Duration};
 use tracing::{debug, error, trace, warn};
 
 use crate::{jobs::JobDefinition, QueueName, Result};
@@ -27,6 +27,24 @@ impl Backend {
     pub fn new(redis_url: &str) -> Result<Self> {
         let redis_client = redis::Client::open(redis_url)?;
         Ok(Self { redis_client })
+    }
+
+    async fn register_job_instance(
+        &self,
+        idempotency_key: &str,
+        clear_time: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut connection = self.redis_client.get_async_connection().await?;
+        let (added_elements, _) = redis::pipe()
+            .zadd(
+                &idempotency_key,
+                clear_time.timestamp_millis(),
+                clear_time.timestamp_millis(),
+            )
+            .expire(&idempotency_key, 24 * 60 * 60)
+            .query_async::<_, (i32, i32)>(&mut connection)
+            .await?;
+        Ok(added_elements == 1)
     }
 }
 
@@ -87,7 +105,7 @@ impl super::Backend for Backend {
                 Ok(_) => {
                     // did not remove. another instance probably took it
                     // TODO better message
-                    warn!("could not remove")
+                    trace!("could not remove. another client probably processed it");
                 }
                 Err(e) => {
                     error!("could not remove: {}", e);
@@ -99,6 +117,30 @@ impl super::Backend for Backend {
     }
 
     async fn enqueue(&self, job_def: &JobDefinition, perform_at: DateTime<Utc>) -> Result<()> {
+        // let redlock = lock::Redlock::new(vec![self.redis_client.clone()]).unwrap();
+        // let lock = if let Some(idempotency_key) = job_def.idempotency_key.as_deref() {
+        //     // todo unwrap
+        //     Some(
+        //         redlock
+        //             .lock(idempotency_key, Duration::from_millis(500))
+        //             .await
+        //             .unwrap(),
+        //     )
+        // } else {
+        //     None
+        // };
+
+        if let Some(idempotency_key) = job_def.idempotency_key.as_deref() {
+            let registered = self
+                .register_job_instance(idempotency_key, perform_at)
+                .await?;
+            if !registered {
+                warn!("already registered");
+                // todo should indicate that the idempotency key was already used
+                return Ok(());
+            }
+        }
+
         let mut connection = self.redis_client.get_async_connection().await?;
 
         if perform_at <= Utc::now() {
@@ -117,6 +159,12 @@ impl super::Backend for Backend {
                 )
                 .await?;
         }
+
+        // if let Some(lock) = lock {
+        //     // todo unwrap
+        //     lock.unlock().await.unwrap();
+        // }
+
         Ok(())
     }
 }
